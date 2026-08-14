@@ -69,8 +69,13 @@ class Scene:
         self.dataset_type=None
                 
         self.maxtime = scene_info.maxtime
-        self.cameras_extent = scene_info.nerf_normalization["radius"]
-        # self.cameras_extent = args.camera_extent
+        normalized_extent = float(scene_info.nerf_normalization["radius"])
+        # Static iMED cameras have coincident centers over time, so the
+        # camera-derived radius is zero and breaks densification scale tests.
+        if is_imed and normalized_extent <= 1e-6:
+            self.cameras_extent = float(args.camera_extent)
+        else:
+            self.cameras_extent = normalized_extent
         print("self.cameras_extent is ", self.cameras_extent)
 
         print("Loading Training Cameras")

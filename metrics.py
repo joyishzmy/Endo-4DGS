@@ -97,6 +97,27 @@ def _build_global_imed_overlap_mask(source_path, out_h, out_w):
     depth = np.load(depth_files[0]).astype(np.float32)
     h2, w2 = depth.shape
 
+    # K.txt stores intrinsics at the original RGB resolution, while iMED
+    # training, rendering, and depth maps use the downsampled depth resolution.
+    # Match the same intrinsic scaling used by scene/imed_loader.py.
+    rgb2_files = sorted((source / "endoscope2" / "L").glob("*.png"))
+    rgb1_files = sorted((source / "endoscope1" / "L").glob("*.png"))
+    assert rgb1_files and rgb2_files, "No RGB files found for iMED cameras"
+    with Image.open(rgb2_files[0]) as image:
+        rgb2_w, rgb2_h = image.size
+    with Image.open(rgb1_files[0]) as image:
+        rgb1_w, rgb1_h = image.size
+    assert (rgb1_w, rgb1_h) == (rgb2_w, rgb2_h), "iMED camera resolutions must match"
+    assert rgb2_w % w2 == 0 and rgb2_h % h2 == 0, "RGB/depth scale must be integer"
+    scale_x = rgb2_w // w2
+    scale_y = rgb2_h // h2
+    k1 = k1.copy()
+    k2 = k2.copy()
+    k1[0, :] /= scale_x
+    k1[1, :] /= scale_y
+    k2[0, :] /= scale_x
+    k2[1, :] /= scale_y
+
     u, v = np.meshgrid(np.arange(w2, dtype=np.float32), np.arange(h2, dtype=np.float32))
     z = depth
     valid = z > 0
@@ -119,10 +140,7 @@ def _build_global_imed_overlap_mask(source_path, out_h, out_w):
     u1 = np.round(u1).astype(np.int32)
     v1 = np.round(v1).astype(np.int32)
 
-    h1 = int(round(float(k1[1, 2]) * 2))
-    w1 = int(round(float(k1[0, 2]) * 2))
-    if h1 <= 0 or w1 <= 0:
-        h1, w1 = h2, w2
+    h1, w1 = h2, w2
     in_bounds = (u1 >= 0) & (u1 < w1) & (v1 >= 0) & (v1 < h1)
     u1 = u1[in_bounds]
     v1 = v1[in_bounds]
@@ -238,12 +256,13 @@ def evaluate(model_paths):
                 renders_dir = method_dir / "renders"
                 masks_dir = method_dir / "masks"
                 overlap_mask_path = method_dir / "overlap_mask.png"
-                
-                renders, gts, masks, image_names = readImages(renders_dir, gt_dir, masks_dir, overlap_mask_path)
+                source_path = _extract_source_path_from_cfg(scene_dir)
+                is_imed_scene = source_path is not None and "imed" in source_path.lower()
+                cached_overlap = None if is_imed_scene else overlap_mask_path
+                renders, gts, masks, image_names = readImages(renders_dir, gt_dir, masks_dir, cached_overlap)
                 if len(renders) > 0:
                     out_h, out_w = int(renders[0].shape[2]), int(renders[0].shape[3])
-                    source_path = _extract_source_path_from_cfg(scene_dir)
-                    if source_path is not None and "imed" in source_path.lower():
+                    if is_imed_scene:
                         global_mask = _build_global_imed_overlap_mask(source_path, out_h, out_w)
                         global_mask_t = torch.from_numpy(global_mask).unsqueeze(0).unsqueeze(0).to(device="cuda", dtype=torch.float32)
                         for i in range(len(masks)):
