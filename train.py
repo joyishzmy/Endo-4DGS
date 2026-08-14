@@ -25,7 +25,8 @@ from utils.general_utils import safe_state, build_rotation
 import uuid
 from tqdm import tqdm
 import torch.nn.functional as F
-from utils.image_utils import psnr, ssim
+from utils.image_utils import psnr, ssim, lpips_score
+from metrics import _build_global_imed_overlap_mask, masked_psnr, masked_ssim
 from utils.loss_utils import mae_loss
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHiddenParams
@@ -447,7 +448,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         # 
-        validation_configs = ({'name': 'test', 'cameras' : [scene.getTestCameras()[idx % len(scene.getTestCameras())] for idx in range(10, 5000, 299)]},)#,
+        validation_configs = ({'name': 'test', 'cameras': list(scene.getTestCameras())},)
         use_imed_overlap_eval = "imed" in args.source_path.lower()
 
         for config in validation_configs:
@@ -458,6 +459,14 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 ssim_test = 0.0
                 overlap_mask = None
 
+                if use_imed_overlap_eval:
+                    sample_image = config['cameras'][0].original_image
+                    out_h, out_w = int(sample_image.shape[-2]), int(sample_image.shape[-1])
+                    overlap_np = _build_global_imed_overlap_mask(args.source_path, out_h, out_w)
+                    overlap_mask = torch.from_numpy(overlap_np).unsqueeze(0).unsqueeze(0).to(
+                        device="cuda", dtype=torch.float32
+                    )
+
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians,stage=stage, cam_type=dataset_type, *renderArgs)["render"], 0.0, 1.0)
                     if dataset_type == "PanopticSports":
@@ -465,20 +474,30 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     else:
                         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
 
+                    pred = image.unsqueeze(0)
+                    gt = gt_image.unsqueeze(0)
                     mask = viewpoint.mask
-                    if mask is not None:
-                        mask = mask.cuda()
-                    if use_imed_overlap_eval:
-                        if overlap_mask is None:
-                            overlap_mask = (image.sum(dim=0) > 0).float()
-                        mask = overlap_mask if mask is None else (mask.float() * overlap_mask).clamp(0.0, 1.0)
+                    if mask is None:
+                        frame_mask = torch.ones(
+                            (1, 1, image.shape[-2], image.shape[-1]),
+                            device="cuda", dtype=torch.float32
+                        )
+                    else:
+                        frame_mask = mask.to(device="cuda", dtype=torch.float32)
+                        if frame_mask.ndim == 2:
+                            frame_mask = frame_mask.unsqueeze(0).unsqueeze(0)
+                        elif frame_mask.ndim == 3:
+                            frame_mask = frame_mask.unsqueeze(0)
+                        frame_mask = (frame_mask > 0.5).float()
+                    if overlap_mask is not None:
+                        frame_mask = frame_mask * overlap_mask
 
-                    if mask is not None:
-                        image = image * mask
-                        gt_image = gt_image * mask
-                    
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).mean().double()
+                    mask3 = frame_mask.expand(-1, pred.shape[1], -1, -1)
+                    valid_values = mask3.sum().clamp_min(1.0)
+                    l1_test += ((pred - gt).abs() * mask3).sum().double() / valid_values
+                    psnr_test += masked_psnr(pred, gt, frame_mask).double()
+                    ssim_test += masked_ssim(pred, gt, frame_mask).double()
+                    lpips_score_test += lpips_score(pred * frame_mask, gt * frame_mask).mean().double()
 
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])  
