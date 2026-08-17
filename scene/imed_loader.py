@@ -1,6 +1,7 @@
 import os
 import re
 import glob
+import warnings
 import numpy as np
 from PIL import Image
 from scipy.spatial.transform import Rotation as R
@@ -100,13 +101,22 @@ class IMED_Dataset:
         mask_paths = sorted(glob.glob(os.path.join(self.root_dir, scope, "toolL", "*.png")))
         assert len(rgb_paths) > 0, f"No RGB frames found in {scope}/L"
         assert len(rgb_paths) == len(depth_paths), f"RGB/depth count mismatch in {scope}"
-        assert len(rgb_paths) == len(mask_paths), f"RGB/mask count mismatch in {scope}"
+
+        masks_missing = len(mask_paths) == 0
+        if masks_missing:
+            warnings.warn(
+                f"No tool masks found in {scope}/toolL; using an all-valid mask in memory.",
+                RuntimeWarning,
+            )
+        else:
+            assert len(rgb_paths) == len(mask_paths), f"RGB/mask count mismatch in {scope}"
 
         rgb_names = [os.path.basename(p).replace(".png", "") for p in rgb_paths]
         depth_names = [os.path.basename(p).replace(".npy", "") for p in depth_paths]
-        mask_names = [os.path.basename(p).replace(".png", "") for p in mask_paths]
         assert rgb_names == depth_names, f"RGB/depth names mismatch in {scope}"
-        assert rgb_names == mask_names, f"RGB/mask names mismatch in {scope}"
+        if not masks_missing:
+            mask_names = [os.path.basename(p).replace(".png", "") for p in mask_paths]
+            assert rgb_names == mask_names, f"RGB/mask names mismatch in {scope}"
 
         records = []
         for i in range(len(rgb_paths)):
@@ -116,7 +126,7 @@ class IMED_Dataset:
                     "frame_id": frame_id,
                     "rgb": rgb_paths[i],
                     "depth": depth_paths[i],
-                    "mask": mask_paths[i],
+                    "mask": None if masks_missing else mask_paths[i],
                 }
             )
         return records
@@ -169,12 +179,17 @@ class IMED_Dataset:
         assert out.ndim == 2 and out.shape == (self.H, self.W), f"Resized mask shape mismatch at {mask_path}"
         return (out > 0)
 
+    def _load_record_mask(self, record):
+        if record["mask"] is None:
+            return np.ones((self.H, self.W), dtype=np.bool_)
+        return self._load_resized_mask(record["mask"])
+
     def _record_to_camera(self, record, c2w, K, time_val, uid):
         color = self._load_resized_rgb(record["rgb"])
         depth = np.load(record["depth"]).astype(np.float32)
         assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
-        mask = self._load_resized_mask(record["mask"])
-        assert mask.shape == (self.H, self.W), f"Mask shape mismatch at {record['mask']}"
+        mask = self._load_record_mask(record)
+        assert mask.shape == (self.H, self.W), f"Mask shape mismatch for {record['rgb']}"
 
         fx = float(K[0, 0]) / (self.downsample * self.scale_x)
         fy = float(K[1, 1]) / (self.downsample * self.scale_y)
@@ -233,7 +248,7 @@ class IMED_Dataset:
         first = self.train_records[0]
         color = self._load_resized_rgb(first["rgb"]).transpose(2, 0, 1)
         depth = np.load(first["depth"]).astype(np.float32)[None, ...]
-        mask = self._load_resized_mask(first["mask"])[None, ...]
+        mask = self._load_record_mask(first)[None, ...]
 
         K = self.K_map["K2_L"]
         intrinsics = [
