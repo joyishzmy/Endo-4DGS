@@ -25,7 +25,7 @@ from utils.general_utils import safe_state, build_rotation
 import uuid
 from tqdm import tqdm
 import torch.nn.functional as F
-from utils.image_utils import psnr, ssim, lpips_score
+from utils.image_utils import psnr, lpips_score
 from metrics import _build_global_imed_overlap_mask, masked_psnr, masked_ssim
 from utils.loss_utils import mae_loss
 from argparse import ArgumentParser, Namespace
@@ -234,9 +234,12 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         else:
             mask_tensor = None
         
-        image_tensor = torch.cat(images,0) * mask_tensor
+        raw_image_tensor = torch.cat(images,0)
+        raw_gt_image_tensor = torch.cat(gt_images,0)
+
+        image_tensor = raw_image_tensor * mask_tensor
         depth_tensor = torch.cat(depths, 0) * mask_tensor
-        gt_image_tensor = torch.cat(gt_images,0) * mask_tensor
+        gt_image_tensor = raw_gt_image_tensor * mask_tensor
         gt_depth_tensor = torch.cat(gt_depths, 0) * mask_tensor
         
         if use_normal:
@@ -285,7 +288,9 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             loss += tv_loss
             
         if opt.lambda_dssim != 0:
-            ssim_loss = ssim(image_tensor, gt_image_tensor)
+            # Match the official iMED evaluation: compute local SSIM statistics
+            # from the original images, then average only over valid pixels.
+            ssim_loss = masked_ssim(raw_image_tensor, raw_gt_image_tensor, mask_tensor)
             loss += opt.lambda_dssim * (1.0-ssim_loss)
             
         loss.backward()
@@ -547,12 +552,15 @@ if __name__ == "__main__":
     
     
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+    # Config files may override iterations after CLI parsing. Always save the
+    # actual final iteration so render.py can load the completed model.
+    if args.iterations not in args.save_iterations:
+        args.save_iterations.append(args.iterations)
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
