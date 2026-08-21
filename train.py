@@ -360,7 +360,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage)
-            if mp.render_process:
+            if mp.render_process and len(test_cams) > 0:
                 if (iteration < 1000 and iteration % 10 == 9) \
                     or (iteration < 3000 and iteration % 50 == 49) \
                         or (iteration < 60000 and iteration %  100 == 99) :
@@ -419,7 +419,9 @@ def training(model_param, hyper, opt, pipe, testing_iterations, saving_iteration
     gaussians = GaussianModel(model_param.sh_degree, hyper)
     model_param.model_path = args.model_path
     timer = Timer()
-    scene = Scene(model_param, gaussians, load_coarse=None)
+    # The iMED challenge forbids loading Endoscope 1 frames during training.
+    # Rendering creates its own Scene with the default load_test_cameras=True.
+    scene = Scene(model_param, gaussians, load_coarse=None, load_test_cameras=False)
     timer.start()
     scene_reconstruction(model_param, opt, hyper, pipe, testing_iterations, saving_iterations,
                              checkpoint_iterations, checkpoint, debug_from,
