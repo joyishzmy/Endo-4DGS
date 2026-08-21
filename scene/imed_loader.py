@@ -244,11 +244,42 @@ class IMED_Dataset:
             cams.append(self._record_to_camera(record, c2w, K, time_val, idx))
         return cams
 
-    def get_pretrain_pcd(self):
-        first = self.train_records[0]
-        color = self._load_resized_rgb(first["rgb"]).transpose(2, 0, 1)
-        depth = np.load(first["depth"]).astype(np.float32)[None, ...]
-        mask = self._load_record_mask(first)[None, ...]
+    def _select_pretrain_record(self, early_fraction):
+        early_fraction = float(early_fraction)
+        assert 0.0 <= early_fraction <= 1.0, "iMED initialization fraction must be in [0, 1]"
+
+        candidate_count = 1
+        if early_fraction > 0.0:
+            candidate_count = max(1, int(np.ceil(len(self.train_records) * early_fraction)))
+
+        best_index = 0
+        best_score = -1.0
+        for index, record in enumerate(self.train_records[:candidate_count]):
+            depth = np.load(record["depth"], mmap_mode="r")
+            assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
+            mask = self._load_record_mask(record)
+            valid = mask & np.isfinite(depth) & (depth > 0)
+            score = float(valid.mean())
+            if score > best_score:
+                best_index = index
+                best_score = score
+
+        return self.train_records[best_index], best_index, candidate_count, best_score
+
+    def get_pretrain_pcd(self, early_fraction=0.0):
+        record, record_index, candidate_count, valid_coverage = self._select_pretrain_record(
+            early_fraction
+        )
+        print(
+            "iMED pretrain initialization frame: "
+            f"index={record_index}, frame_id={record['frame_id']}, "
+            f"candidates={candidate_count}, valid_coverage={valid_coverage:.6f}"
+        )
+
+        color = self._load_resized_rgb(record["rgb"]).transpose(2, 0, 1)
+        depth = np.load(record["depth"]).astype(np.float32)[None, ...]
+        valid_depth = np.isfinite(depth[0]) & (depth[0] > 0)
+        mask = (self._load_record_mask(record) & valid_depth)[None, ...]
 
         K = self.K_map["K2_L"]
         intrinsics = [

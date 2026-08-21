@@ -547,12 +547,14 @@ if __name__ == "__main__":
     
     
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+    # Config files may override iterations, so add the final value after merging.
+    if args.iterations not in args.save_iterations:
+        args.save_iterations.append(args.iterations)
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

@@ -498,7 +498,7 @@ def readEndoNeRFInfo(datadir, use_bg_points, eval, use_pretrain=True):
     return scene_info
 
 
-def readIMEDInfo(datadir, use_bg_points, eval, use_pretrain=True):
+def readIMEDInfo(datadir, use_bg_points, eval, use_pretrain=True, init_early_fraction=0.0):
     from scene.imed_loader import IMED_Dataset
 
     imed_dataset = IMED_Dataset(datadir=datadir, downsample=1.0)
@@ -509,7 +509,7 @@ def readIMEDInfo(datadir, use_bg_points, eval, use_pretrain=True):
 
     ply_path = os.path.join(datadir, "points3d.ply")
     if use_pretrain:
-        xyz, rgb, normals = imed_dataset.get_pretrain_pcd()
+        xyz, rgb, normals = imed_dataset.get_pretrain_pcd(init_early_fraction)
     else:
         num_pcd = int(imed_dataset.H * imed_dataset.W)
         xyz = np.stack([np.arange(-50, 50, step=100 / num_pcd),

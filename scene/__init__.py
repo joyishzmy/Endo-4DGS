@@ -51,7 +51,13 @@ class Scene:
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.use_pretrain)
         elif is_imed:
-            scene_info = sceneLoadTypeCallbacks["imed"](args.source_path, args.white_background, args.eval, args.use_pretrain)
+            scene_info = sceneLoadTypeCallbacks["imed"](
+                args.source_path,
+                args.white_background,
+                args.eval,
+                args.use_pretrain,
+                getattr(args, "imed_init_early_fraction", 0.0),
+            )
             print("Found IMED session structure, loading IMED dataset")
         elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")) and ('endo' in source_path_lower or 'stereomis' in source_path_lower):
             scene_info = sceneLoadTypeCallbacks["endonerf"](args.source_path, args.white_background, args.eval, args.use_pretrain)
