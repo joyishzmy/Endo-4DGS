@@ -14,9 +14,10 @@ from scene.endo_loader import CameraInfo
 
 
 class IMED_Dataset:
-    def __init__(self, datadir, downsample=1.0):
+    def __init__(self, datadir, downsample=1.0, load_test=True):
         self.root_dir = datadir
         self.downsample = downsample
+        self.load_test = load_test
         self.transform = T.ToTensor()
         self.maxtime = 1.0
 
@@ -32,7 +33,8 @@ class IMED_Dataset:
     def _validate_structure(self):
         assert os.path.isfile(os.path.join(self.root_dir, "pose.txt")), "Missing pose.txt"
         assert os.path.isfile(os.path.join(self.root_dir, "K.txt")), "Missing K.txt"
-        for scope in ("endoscope1", "endoscope2"):
+        scopes = ("endoscope1", "endoscope2") if self.load_test else ("endoscope2",)
+        for scope in scopes:
             for subdir in ("L", "depthL", "toolL"):
                 path = os.path.join(self.root_dir, scope, subdir)
                 assert os.path.isdir(path), f"Missing required folder: {path}"
@@ -133,10 +135,11 @@ class IMED_Dataset:
 
     def _load_streams(self):
         self.train_records = self._collect_stream("endoscope2")
-        self.test_records = self._collect_stream("endoscope1")
+        self.test_records = self._collect_stream("endoscope1") if self.load_test else []
         train_ids = [r["frame_id"] for r in self.train_records]
-        test_ids = [r["frame_id"] for r in self.test_records]
-        assert train_ids == test_ids, "Train/test camera frame ids must align exactly"
+        if self.load_test:
+            test_ids = [r["frame_id"] for r in self.test_records]
+            assert train_ids == test_ids, "Train/test camera frame ids must align exactly"
 
         first_img = np.array(Image.open(self.train_records[0]["rgb"]))
         first_depth = np.load(self.train_records[0]["depth"])

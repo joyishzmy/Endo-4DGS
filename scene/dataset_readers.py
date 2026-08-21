@@ -498,12 +498,16 @@ def readEndoNeRFInfo(datadir, use_bg_points, eval, use_pretrain=True):
     return scene_info
 
 
-def readIMEDInfo(datadir, use_bg_points, eval, use_pretrain=True):
+def readIMEDInfo(datadir, use_bg_points, eval, use_pretrain=True, load_test_cameras=True):
     from scene.imed_loader import IMED_Dataset
 
-    imed_dataset = IMED_Dataset(datadir=datadir, downsample=1.0)
+    imed_dataset = IMED_Dataset(
+        datadir=datadir,
+        downsample=1.0,
+        load_test=load_test_cameras,
+    )
     train_cam_infos = imed_dataset.format_infos(split="train")
-    test_cam_infos = imed_dataset.format_infos(split="test")
+    test_cam_infos = imed_dataset.format_infos(split="test") if load_test_cameras else []
     video_cam_infos = None
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
