@@ -64,6 +64,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     print('Use smooth:', use_smooth)
     print('Use normal:', use_normal)
     print('Use confidence:', use_confidence)
+    print('Normalize losses by valid pixels:', pipe.valid_pixel_normalization)
     
     gaussians.training_setup(opt)
     if checkpoint:
@@ -245,13 +246,22 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             confidences = torch.cat(confidences, 0) * mask_tensor
         
         # Loss
-        Ll1 = l1_loss(image_tensor, gt_image_tensor, mask_tensor.unsqueeze(0))
+        Ll1 = l1_loss(
+            image_tensor,
+            gt_image_tensor,
+            mask_tensor.unsqueeze(0),
+            normalize_by_valid=pipe.valid_pixel_normalization,
+        )
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
         # norm
         if use_depth:
             depth_weight = hyper.depth_weight
-            depth_loss = l1_loss(depth_tensor/(depth_tensor.max()+1e-6), gt_depth_tensor/(gt_depth_tensor.max()+1e-6), \
-                mask=mask_tensor.unsqueeze(0))*depth_weight
+            depth_loss = l1_loss(
+                depth_tensor / (depth_tensor.max() + 1e-6),
+                gt_depth_tensor / (gt_depth_tensor.max() + 1e-6),
+                mask=mask_tensor.unsqueeze(0),
+                normalize_by_valid=pipe.valid_pixel_normalization,
+            ) * depth_weight
             loss = Ll1 + depth_loss 
         else:
             loss = Ll1
@@ -547,12 +557,14 @@ if __name__ == "__main__":
     
     
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+    # Config files may override iterations, so add the final value after merging.
+    if args.iterations not in args.save_iterations:
+        args.save_iterations.append(args.iterations)
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

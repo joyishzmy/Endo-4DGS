@@ -74,12 +74,17 @@ def lpips_loss(img1, img2, lpips_model):
     loss = lpips_model(img1,img2)
     return loss.mean()
 
-def l1_loss(network_output, gt, mask=None):
+def l1_loss(network_output, gt, mask=None, normalize_by_valid=False):
     nan_mask = ~torch.isnan(network_output)
     if mask is not None:
         if mask.shape[1] != network_output.shape[1]:
             mask = mask.expand(-1, network_output.shape[1], -1, -1)
     if mask is not None:
+        if normalize_by_valid:
+            valid_mask = nan_mask & ~torch.isnan(gt) & (mask > 0)
+            if not torch.any(valid_mask):
+                return network_output.sum() * 0.0
+            return torch.abs(network_output[valid_mask] - gt[valid_mask]).mean()
         return (torch.abs((network_output[nan_mask] - gt[nan_mask]))*mask[nan_mask]).mean()
     else:
         return (torch.abs((network_output[nan_mask] - gt[nan_mask]))).mean()

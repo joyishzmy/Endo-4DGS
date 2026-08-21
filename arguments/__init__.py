@@ -76,6 +76,7 @@ class PipelineParams(ParamGroup):
         self.use_smooth=False
         self.use_normal=False
         self.use_confidence=False
+        self.valid_pixel_normalization=False
         super().__init__(parser, "Pipeline Parameters")
         
 class ModelHiddenParams(ParamGroup):
