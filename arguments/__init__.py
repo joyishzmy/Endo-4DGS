@@ -60,6 +60,7 @@ class ModelParams(ParamGroup):
         self.llffhold=8
         self.camera_extent=0
         self.use_pretrain=True
+        self.imed_source_overlap_mask=False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

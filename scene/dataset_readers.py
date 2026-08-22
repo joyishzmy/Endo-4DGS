@@ -498,13 +498,21 @@ def readEndoNeRFInfo(datadir, use_bg_points, eval, use_pretrain=True):
     return scene_info
 
 
-def readIMEDInfo(datadir, use_bg_points, eval, use_pretrain=True, load_test_cameras=True):
+def readIMEDInfo(
+    datadir,
+    use_bg_points,
+    eval,
+    use_pretrain=True,
+    load_test_cameras=True,
+    source_overlap_mask=False,
+):
     from scene.imed_loader import IMED_Dataset
 
     imed_dataset = IMED_Dataset(
         datadir=datadir,
         downsample=1.0,
         load_test=load_test_cameras,
+        use_source_overlap_mask=source_overlap_mask and not load_test_cameras,
     )
     train_cam_infos = imed_dataset.format_infos(split="train")
     test_cam_infos = imed_dataset.format_infos(split="test") if load_test_cameras else []

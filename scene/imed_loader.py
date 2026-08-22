@@ -14,10 +14,17 @@ from scene.endo_loader import CameraInfo
 
 
 class IMED_Dataset:
-    def __init__(self, datadir, downsample=1.0, load_test=True):
+    def __init__(
+        self,
+        datadir,
+        downsample=1.0,
+        load_test=True,
+        use_source_overlap_mask=False,
+    ):
         self.root_dir = datadir
         self.downsample = downsample
         self.load_test = load_test
+        self.use_source_overlap_mask = use_source_overlap_mask
         self.transform = T.ToTensor()
         self.maxtime = 1.0
 
@@ -187,12 +194,67 @@ class IMED_Dataset:
             return np.ones((self.H, self.W), dtype=np.bool_)
         return self._load_resized_mask(record["mask"])
 
-    def _record_to_camera(self, record, c2w, K, time_val, uid):
+    def _build_source_overlap_mask(self, depth):
+        """Return Endoscope2 pixels whose 3D points project into Endoscope1."""
+        assert depth.shape == (self.H, self.W), "Depth shape mismatch for overlap mask"
+
+        valid_depth = np.isfinite(depth) & (depth > 0)
+        valid_flat = np.flatnonzero(valid_depth.reshape(-1))
+        overlap_flat = np.zeros(self.H * self.W, dtype=np.bool_)
+        if valid_flat.size == 0:
+            return overlap_flat.reshape(self.H, self.W)
+
+        source_v, source_u = np.divmod(valid_flat, self.W)
+        z2 = depth.reshape(-1)[valid_flat].astype(np.float64)
+
+        K2 = self.K_map["K2_L"].astype(np.float64).copy()
+        K1 = self.K_map["K1_L"].astype(np.float64).copy()
+        K2[0, :] /= self.downsample * self.scale_x
+        K2[1, :] /= self.downsample * self.scale_y
+        K1[0, :] /= self.downsample * self.scale_x
+        K1[1, :] /= self.downsample * self.scale_y
+
+        x2 = (source_u.astype(np.float64) - K2[0, 2]) * z2 / K2[0, 0]
+        y2 = (source_v.astype(np.float64) - K2[1, 2]) * z2 / K2[1, 1]
+        points_cam2 = np.stack((x2, y2, z2, np.ones_like(z2)), axis=1)
+
+        cam2_to_cam1 = np.linalg.inv(self.c2w_map["cam1"]) @ self.c2w_map["cam2"]
+        points_cam1 = (cam2_to_cam1.astype(np.float64) @ points_cam2.T).T[:, :3]
+        z1 = points_cam1[:, 2]
+        in_front = np.isfinite(points_cam1).all(axis=1) & (z1 > 1e-6)
+
+        target_u = np.full(z1.shape, -1, dtype=np.int64)
+        target_v = np.full(z1.shape, -1, dtype=np.int64)
+        target_u[in_front] = np.rint(
+            K1[0, 0] * points_cam1[in_front, 0] / z1[in_front] + K1[0, 2]
+        ).astype(np.int64)
+        target_v[in_front] = np.rint(
+            K1[1, 1] * points_cam1[in_front, 1] / z1[in_front] + K1[1, 2]
+        ).astype(np.int64)
+        inside = (
+            in_front
+            & (target_u >= 0)
+            & (target_u < self.W)
+            & (target_v >= 0)
+            & (target_v < self.H)
+        )
+        overlap_flat[valid_flat[inside]] = True
+        return overlap_flat.reshape(self.H, self.W)
+
+    def _record_to_camera(self, record, c2w, K, time_val, uid, apply_source_overlap=False):
         color = self._load_resized_rgb(record["rgb"])
         depth = np.load(record["depth"]).astype(np.float32)
         assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
         mask = self._load_record_mask(record)
         assert mask.shape == (self.H, self.W), f"Mask shape mismatch for {record['rgb']}"
+        if apply_source_overlap:
+            overlap_mask = self._build_source_overlap_mask(depth)
+            tool_free_fraction = float(mask.mean())
+            source_visible_fraction = float(overlap_mask.mean())
+            mask = mask & overlap_mask
+            self._source_overlap_stats.append(
+                (tool_free_fraction, source_visible_fraction, float(mask.mean()))
+            )
 
         fx = float(K[0, 0]) / (self.downsample * self.scale_x)
         fy = float(K[1, 1]) / (self.downsample * self.scale_y)
@@ -239,12 +301,32 @@ class IMED_Dataset:
             c2w = self.c2w_map["cam1"]
             K = self.K_map["K1_L"]
 
+        apply_source_overlap = split == "train" and self.use_source_overlap_mask
+        self._source_overlap_stats = []
         n = len(records)
         denom = max(n - 1, 1)
         cams = []
         for idx, record in enumerate(records):
             time_val = idx / denom
-            cams.append(self._record_to_camera(record, c2w, K, time_val, idx))
+            cams.append(
+                self._record_to_camera(
+                    record,
+                    c2w,
+                    K,
+                    time_val,
+                    idx,
+                    apply_source_overlap=apply_source_overlap,
+                )
+            )
+        if apply_source_overlap and self._source_overlap_stats:
+            stats = np.asarray(self._source_overlap_stats, dtype=np.float64)
+            print(
+                "iMED source-overlap training mask: "
+                f"frames={len(stats)}, "
+                f"tool_free_mean={stats[:, 0].mean():.4f}, "
+                f"source_visible_mean={stats[:, 1].mean():.4f}, "
+                f"effective_mean={stats[:, 2].mean():.4f}"
+            )
         return cams
 
     def get_pretrain_pcd(self):
