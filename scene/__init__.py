@@ -58,6 +58,7 @@ class Scene:
                 args.use_pretrain,
                 load_test_cameras,
                 getattr(args, "imed_source_overlap_mask", False),
+                getattr(args, "imed_source_overlap_weight", False),
             )
             print("Found IMED session structure, loading IMED dataset")
         elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")) and ('endo' in source_path_lower or 'stereomis' in source_path_lower):

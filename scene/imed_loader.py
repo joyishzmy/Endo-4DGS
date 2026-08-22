@@ -20,11 +20,16 @@ class IMED_Dataset:
         downsample=1.0,
         load_test=True,
         use_source_overlap_mask=False,
+        use_source_overlap_weight=False,
     ):
         self.root_dir = datadir
         self.downsample = downsample
         self.load_test = load_test
         self.use_source_overlap_mask = use_source_overlap_mask
+        self.use_source_overlap_weight = use_source_overlap_weight
+        assert not (use_source_overlap_mask and use_source_overlap_weight), (
+            "Hard source-overlap masking and soft source-overlap weighting are mutually exclusive"
+        )
         self.transform = T.ToTensor()
         self.maxtime = 1.0
 
@@ -241,20 +246,27 @@ class IMED_Dataset:
         overlap_flat[valid_flat[inside]] = True
         return overlap_flat.reshape(self.H, self.W)
 
-    def _record_to_camera(self, record, c2w, K, time_val, uid, apply_source_overlap=False):
+    def _record_to_camera(self, record, c2w, K, time_val, uid, source_overlap_mode="off"):
         color = self._load_resized_rgb(record["rgb"])
         depth = np.load(record["depth"]).astype(np.float32)
         assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
         mask = self._load_record_mask(record)
         assert mask.shape == (self.H, self.W), f"Mask shape mismatch for {record['rgb']}"
-        if apply_source_overlap:
+        source_overlap_mask = None
+        if source_overlap_mode != "off":
             overlap_mask = self._build_source_overlap_mask(depth)
             tool_free_fraction = float(mask.mean())
             source_visible_fraction = float(overlap_mask.mean())
-            mask = mask & overlap_mask
+            effective_fraction = float((mask & overlap_mask).mean())
             self._source_overlap_stats.append(
-                (tool_free_fraction, source_visible_fraction, float(mask.mean()))
+                (tool_free_fraction, source_visible_fraction, effective_fraction)
             )
+            if source_overlap_mode == "hard":
+                mask = mask & overlap_mask
+            elif source_overlap_mode == "soft":
+                source_overlap_mask = overlap_mask
+            else:
+                raise ValueError(f"Unsupported source-overlap mode: {source_overlap_mode}")
 
         fx = float(K[0, 0]) / (self.downsample * self.scale_x)
         fy = float(K[1, 1]) / (self.downsample * self.scale_y)
@@ -269,6 +281,9 @@ class IMED_Dataset:
         image = self.transform(np.ascontiguousarray(color))
         depth_t = torch.from_numpy(np.ascontiguousarray(depth[None, ...]))
         mask_t = torch.from_numpy(np.ascontiguousarray(mask))
+        source_overlap_mask_t = None
+        if source_overlap_mask is not None:
+            source_overlap_mask_t = torch.from_numpy(np.ascontiguousarray(source_overlap_mask))
         fov_x = focal2fov(fx, self.W)
         fov_y = focal2fov(fy, self.H)
         return CameraInfo(
@@ -288,6 +303,7 @@ class IMED_Dataset:
             Zfar=None,
             Znear=None,
             pc=None,
+            source_overlap_mask=source_overlap_mask_t,
         )
 
     def format_infos(self, split):
@@ -301,7 +317,11 @@ class IMED_Dataset:
             c2w = self.c2w_map["cam1"]
             K = self.K_map["K1_L"]
 
-        apply_source_overlap = split == "train" and self.use_source_overlap_mask
+        source_overlap_mode = "off"
+        if split == "train" and self.use_source_overlap_mask:
+            source_overlap_mode = "hard"
+        elif split == "train" and self.use_source_overlap_weight:
+            source_overlap_mode = "soft"
         self._source_overlap_stats = []
         n = len(records)
         denom = max(n - 1, 1)
@@ -315,13 +335,14 @@ class IMED_Dataset:
                     K,
                     time_val,
                     idx,
-                    apply_source_overlap=apply_source_overlap,
+                    source_overlap_mode=source_overlap_mode,
                 )
             )
-        if apply_source_overlap and self._source_overlap_stats:
+        if source_overlap_mode != "off" and self._source_overlap_stats:
             stats = np.asarray(self._source_overlap_stats, dtype=np.float64)
+            label = "source-overlap training mask" if source_overlap_mode == "hard" else "soft-overlap geometry"
             print(
-                "iMED source-overlap training mask: "
+                f"iMED {label}: "
                 f"frames={len(stats)}, "
                 f"tool_free_mean={stats[:, 0].mean():.4f}, "
                 f"source_visible_mean={stats[:, 1].mean():.4f}, "

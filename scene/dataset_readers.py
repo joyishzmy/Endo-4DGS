@@ -505,6 +505,7 @@ def readIMEDInfo(
     use_pretrain=True,
     load_test_cameras=True,
     source_overlap_mask=False,
+    source_overlap_weight=False,
 ):
     from scene.imed_loader import IMED_Dataset
 
@@ -513,6 +514,7 @@ def readIMEDInfo(
         downsample=1.0,
         load_test=load_test_cameras,
         use_source_overlap_mask=source_overlap_mask and not load_test_cameras,
+        use_source_overlap_weight=source_overlap_weight and not load_test_cameras,
     )
     train_cam_infos = imed_dataset.format_infos(split="train")
     test_cam_infos = imed_dataset.format_infos(split="test") if load_test_cameras else []

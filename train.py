@@ -43,6 +43,19 @@ import open3d as o3d
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
+
+def _build_imed_soft_overlap_weight(tool_mask, source_overlap_mask):
+    """Reweight visible RGB pixels without changing total photometric weight."""
+    assert tool_mask.shape == source_overlap_mask.shape
+    valid = tool_mask.float()
+    overlap = source_overlap_mask.float() * valid
+    spatial_dims = tuple(range(1, valid.ndim))
+    valid_count = valid.sum(dim=spatial_dims, keepdim=True)
+    overlap_ratio = overlap.sum(dim=spatial_dims, keepdim=True) / valid_count.clamp_min(1.0)
+    raw_weight = valid * (1.0 + (1.0 - overlap_ratio) * overlap)
+    raw_count = raw_weight.sum(dim=spatial_dims, keepdim=True)
+    return raw_weight * valid_count / raw_count.clamp_min(1.0)
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -83,6 +96,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     iter_end = torch.cuda.Event(enable_timing = True)
     viewpoint_stack = None
     final_iter = train_iter
+    soft_overlap_logged = False
     
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training")
     first_iter += 1
@@ -173,6 +187,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         gt_depths = []
         depths = []
         masks = []
+        source_overlap_masks = []
         radii_list = []
         visibility_filter_list = []
         viewspace_point_tensor_list = []
@@ -209,6 +224,9 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             if mask is not None:
                 mask = mask.cuda()
                 masks.append(mask.unsqueeze(0))
+            source_overlap_mask = getattr(viewpoint_cam, "source_overlap_mask", None)
+            if source_overlap_mask is not None:
+                source_overlap_masks.append(source_overlap_mask.cuda().unsqueeze(0))
             
             images.append(image.unsqueeze(0))
             dep_mask = torch.logical_and(gt_depth > 0, depth > 0)
@@ -233,6 +251,28 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             mask_tensor = torch.cat(masks, 0)
         else:
             mask_tensor = None
+        if source_overlap_masks:
+            assert len(source_overlap_masks) == len(viewpoint_cams), (
+                "Soft source-overlap masks must be present for every camera in a batch"
+            )
+            source_overlap_tensor = torch.cat(source_overlap_masks, 0)
+            rgb_loss_weight = _build_imed_soft_overlap_weight(
+                mask_tensor,
+                source_overlap_tensor,
+            )
+            if not soft_overlap_logged:
+                valid_weights = rgb_loss_weight[mask_tensor.bool()]
+                sum_ratio = rgb_loss_weight.sum() / mask_tensor.float().sum().clamp_min(1.0)
+                print(
+                    "iMED soft-overlap RGB weights: "
+                    f"min={valid_weights.min().item():.4f}, "
+                    f"max={valid_weights.max().item():.4f}, "
+                    f"sum_ratio={sum_ratio.item():.4f}"
+                )
+                soft_overlap_logged = True
+        else:
+            source_overlap_tensor = None
+            rgb_loss_weight = mask_tensor
         
         image_tensor = torch.cat(images,0) * mask_tensor
         depth_tensor = torch.cat(depths, 0) * mask_tensor
@@ -245,7 +285,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             confidences = torch.cat(confidences, 0) * mask_tensor
         
         # Loss
-        Ll1 = l1_loss(image_tensor, gt_image_tensor, mask_tensor.unsqueeze(0))
+        Ll1 = l1_loss(image_tensor, gt_image_tensor, rgb_loss_weight.unsqueeze(1))
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
         # norm
         if use_depth:

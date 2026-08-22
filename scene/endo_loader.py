@@ -46,6 +46,7 @@ class CameraInfo(NamedTuple):
     Zfar: float
     Znear: float
     pc: np.array
+    source_overlap_mask: np.array = None
 
 def normalize(v):
     """Normalize a vector."""
