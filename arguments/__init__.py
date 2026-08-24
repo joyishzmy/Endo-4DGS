@@ -62,6 +62,7 @@ class ModelParams(ParamGroup):
         self.use_pretrain=True
         self.imed_source_overlap_mask=False
         self.imed_source_overlap_weight=False
+        self.imed_source_overlap_visibility_threshold=1.0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

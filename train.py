@@ -36,6 +36,7 @@ from utils.loader_utils import FineSampler, get_stamp_list
 from utils.scene_utils import render_training_image
 from utils.loss_utils import GradL1Loss, confidence_loss, TV_loss
 from utils.graphics_utils import get_pseudo_normal
+from utils.imed_overlap import build_imed_soft_overlap_weight
 from time import time
 import copy
 import open3d as o3d
@@ -43,18 +44,6 @@ import open3d as o3d
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
-
-def _build_imed_soft_overlap_weight(tool_mask, source_overlap_mask):
-    """Reweight visible RGB pixels without changing total photometric weight."""
-    assert tool_mask.shape == source_overlap_mask.shape
-    valid = tool_mask.float()
-    overlap = source_overlap_mask.float() * valid
-    spatial_dims = tuple(range(1, valid.ndim))
-    valid_count = valid.sum(dim=spatial_dims, keepdim=True)
-    overlap_ratio = overlap.sum(dim=spatial_dims, keepdim=True) / valid_count.clamp_min(1.0)
-    raw_weight = valid * (1.0 + (1.0 - overlap_ratio) * overlap)
-    raw_count = raw_weight.sum(dim=spatial_dims, keepdim=True)
-    return raw_weight * valid_count / raw_count.clamp_min(1.0)
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -256,15 +245,23 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 "Soft source-overlap masks must be present for every camera in a batch"
             )
             source_overlap_tensor = torch.cat(source_overlap_masks, 0)
-            rgb_loss_weight = _build_imed_soft_overlap_weight(
+            soft_overlap = build_imed_soft_overlap_weight(
                 mask_tensor,
                 source_overlap_tensor,
+                mp.imed_source_overlap_visibility_threshold,
             )
+            rgb_loss_weight = soft_overlap.weight
             if not soft_overlap_logged:
                 valid_weights = rgb_loss_weight[mask_tensor.bool()]
                 sum_ratio = rgb_loss_weight.sum() / mask_tensor.float().sum().clamp_min(1.0)
+                active_count = soft_overlap.active.sum().item()
+                frame_count = soft_overlap.active.numel()
                 print(
                     "iMED soft-overlap RGB weights: "
+                    f"visibility_threshold={mp.imed_source_overlap_visibility_threshold:.4f}, "
+                    f"raw_visibility_min={soft_overlap.raw_visibility.min().item():.4f}, "
+                    f"raw_visibility_max={soft_overlap.raw_visibility.max().item():.4f}, "
+                    f"active_frames={active_count}/{frame_count}, "
                     f"min={valid_weights.min().item():.4f}, "
                     f"max={valid_weights.max().item():.4f}, "
                     f"sum_ratio={sum_ratio.item():.4f}"
