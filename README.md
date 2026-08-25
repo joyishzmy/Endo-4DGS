@@ -88,6 +88,13 @@ that do not certify source-only provenance or fail geometric validation.
 the frozen gate090 baseline, robust RGB-D/multi-keyframe initialization (`G1`),
 and synchronized L/R supervision with projected right pseudo-depth (`G2`).
 
+The corrected v2 experiment is `scripts/run_imed_stereo_principal_v2.sh`. It
+uses the actual off-center principal points from `K.txt` for every iMED camera.
+Its right camera contributes RGB supervision only; projected left depth defines
+right-view visibility but is excluded from depth, normal, smoothness, and depth
+confidence losses. The script reruns a principal-point baseline and G1 control,
+so results are paired rather than compared against legacy centered projections.
+
 ## Setup
 
 ```bash

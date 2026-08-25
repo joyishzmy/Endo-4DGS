@@ -66,6 +66,8 @@ class ModelParams(ParamGroup):
         self.imed_source_overlap_anneal_start=-1
         self.imed_use_stereo=False
         self.imed_stereo_calibration_dir=""
+        self.imed_use_principal_point=False
+        self.imed_stereo_right_rgb_only=False
         self.imed_metric_depth_loss=False
         self.imed_pretrain_keyframes=1
         self.imed_pretrain_max_points=360000

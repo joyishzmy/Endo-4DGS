@@ -44,7 +44,10 @@ class FourDGSdataset(Dataset):
                           Znear=Znear, Zfar=Zfar, pc=pc,
                           source_overlap_mask=source_overlap_mask,
                           stereo_pair_id=getattr(caminfo, "stereo_pair_id", -1),
-                          stereo_eye=getattr(caminfo, "stereo_eye", "mono"))
+                          stereo_eye=getattr(caminfo, "stereo_eye", "mono"),
+                          cx=getattr(caminfo, "cx", None),
+                          cy=getattr(caminfo, "cy", None),
+                          depth_supervision=getattr(caminfo, "depth_supervision", True))
     
     def __len__(self):
         return len(self.dataset)

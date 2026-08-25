@@ -510,6 +510,8 @@ def readIMEDInfo(
     stereo_calibration_dir="",
     pretrain_keyframes=1,
     pretrain_max_points=360000,
+    use_principal_point=False,
+    stereo_right_rgb_only=False,
 ):
     from scene.imed_loader import IMED_Dataset
 
@@ -523,6 +525,14 @@ def readIMEDInfo(
         stereo_calibration_dir=stereo_calibration_dir,
         pretrain_keyframes=pretrain_keyframes,
         pretrain_max_points=pretrain_max_points,
+        use_principal_point=use_principal_point,
+        # Test/render loading intentionally disables the stereo training stream.
+        # Keep the RGB-only constraint scoped to the training-time stereo path;
+        # otherwise loading a trained G2 model for rendering would trip the
+        # IMED_Dataset consistency assertion (RGB-only requires use_stereo).
+        stereo_right_rgb_only=(
+            stereo_right_rgb_only and use_stereo and not load_test_cameras
+        ),
     )
     train_cam_infos = imed_dataset.format_infos(split="train")
     test_cam_infos = imed_dataset.format_infos(split="test") if load_test_cameras else []

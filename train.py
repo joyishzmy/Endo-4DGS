@@ -96,6 +96,15 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     test_cams = scene.getTestCameras()
     train_cams = scene.getTrainCameras()
 
+    if mp.imed_use_principal_point:
+        if any(
+            getattr(camera_info, "cx", None) is None
+            or getattr(camera_info, "cy", None) is None
+            for camera_info in train_cams.dataset
+        ):
+            raise ValueError("Principal-point mode requires cx/cy for every training camera")
+        print("iMED off-center principal-point projection enabled")
+
     stereo_pairs = None
     if mp.imed_use_stereo:
         assert not opt.dataloader, "iMED paired stereo currently requires dataloader=False"
@@ -111,6 +120,13 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         if not pair_map or any(set(pair) != {"L", "R"} for pair in pair_map.values()):
             raise ValueError("Every iMED stereo timestamp must contain exactly one L and one R camera")
         stereo_pairs = [(pair["L"], pair["R"]) for _, pair in sorted(pair_map.items())]
+        if mp.imed_stereo_right_rgb_only:
+            for left_index, right_index in stereo_pairs:
+                if not getattr(train_cams.dataset[left_index], "depth_supervision", True):
+                    raise ValueError("Left stereo cameras must retain depth supervision")
+                if getattr(train_cams.dataset[right_index], "depth_supervision", True):
+                    raise ValueError("RGB-only mode must disable right pseudo-depth supervision")
+            print("iMED right camera supervision: RGB only; pseudo-depth is visibility-only")
         print(f"iMED paired stereo sampler: pairs={len(stereo_pairs)}, batch_size=2")
 
     if not viewpoint_stack and not opt.dataloader and stereo_pairs is None:
@@ -200,6 +216,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         gt_depths = []
         depths = []
         masks = []
+        depth_supervision_masks = []
         source_overlap_masks = []
         radii_list = []
         visibility_filter_list = []
@@ -237,6 +254,10 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             if mask is not None:
                 mask = mask.cuda()
                 masks.append(mask.unsqueeze(0))
+                if getattr(viewpoint_cam, "depth_supervision", True):
+                    depth_supervision_masks.append(mask.unsqueeze(0))
+                else:
+                    depth_supervision_masks.append(torch.zeros_like(mask).unsqueeze(0))
             source_overlap_mask = getattr(viewpoint_cam, "source_overlap_mask", None)
             if source_overlap_mask is not None:
                 source_overlap_masks.append(source_overlap_mask.cuda().unsqueeze(0))
@@ -262,8 +283,10 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         
         if len(masks) != 0:
             mask_tensor = torch.cat(masks, 0)
+            depth_supervision_tensor = torch.cat(depth_supervision_masks, 0)
         else:
             mask_tensor = None
+            depth_supervision_tensor = None
         if source_overlap_masks:
             assert len(source_overlap_masks) == len(viewpoint_cams), (
                 "Soft source-overlap masks must be present for every camera in a batch"
@@ -321,10 +344,11 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             rgb_loss_weight = mask_tensor
         
         valid_mask = mask_tensor.unsqueeze(1)
+        depth_valid_mask = depth_supervision_tensor.unsqueeze(1)
         image_tensor = torch.cat(images,0) * valid_mask
-        depth_tensor = torch.cat(depths, 0) * valid_mask
+        depth_tensor = torch.cat(depths, 0) * depth_valid_mask
         gt_image_tensor = torch.cat(gt_images,0) * valid_mask
-        gt_depth_tensor = torch.cat(gt_depths, 0) * valid_mask
+        gt_depth_tensor = torch.cat(gt_depths, 0) * depth_valid_mask
         
         if use_normal:
             gs_normal = torch.cat(gs_normal, 0) * valid_mask
@@ -339,25 +363,25 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             depth_weight = hyper.depth_weight
             if mp.imed_metric_depth_loss:
                 depth_loss = robust_log_depth_loss(
-                    depth_tensor, gt_depth_tensor, valid_mask
+                    depth_tensor, gt_depth_tensor, depth_valid_mask
                 ) * depth_weight
             else:
                 depth_loss = l1_loss(depth_tensor/(depth_tensor.max()+1e-6), gt_depth_tensor/(gt_depth_tensor.max()+1e-6), \
-                    mask=valid_mask)*depth_weight
+                    mask=depth_valid_mask)*depth_weight
             loss = Ll1 + depth_loss 
         else:
             loss = Ll1
         
         if use_smooth:
             grad_weight=hyper.depth_weight
-            sm_loss = (grad_loss(depth_tensor, gt_depth_tensor, mask=mask_tensor)) * grad_weight
+            sm_loss = (grad_loss(depth_tensor, gt_depth_tensor, mask=depth_supervision_tensor)) * grad_weight
             loss += sm_loss
             
         if use_normal:
             normal_weight = hyper.normal_weight
-            pseudo_normal=get_pseudo_normal(gt_depth_tensor, valid_mask)
+            pseudo_normal=get_pseudo_normal(gt_depth_tensor, depth_valid_mask)
             pseudo_normal = F.interpolate(pseudo_normal, gs_normal.shape[2:4])
-            normal_loss = mae_loss(gs_normal, pseudo_normal, valid_mask)*normal_weight
+            normal_loss = mae_loss(gs_normal, pseudo_normal, depth_valid_mask)*normal_weight
             loss += normal_loss
             
         if use_confidence:
@@ -366,7 +390,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             confidence_loss_img = confidence_loss(gt_image_tensor, image_tensor, \
                 confidences, valid_mask)*un_img_weight
             confidence_loss_dep = confidence_loss(gt_depth_tensor/gt_depth_tensor.max(), \
-                depth_tensor/depth_tensor.max(), confidences, valid_mask)*un_dep_weight
+                depth_tensor/depth_tensor.max(), confidences, depth_valid_mask)*un_dep_weight
             loss += confidence_loss_img
             loss += confidence_loss_dep
             

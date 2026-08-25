@@ -26,6 +26,8 @@ class IMED_Dataset:
         stereo_calibration_dir="",
         pretrain_keyframes=1,
         pretrain_max_points=360000,
+        use_principal_point=False,
+        stereo_right_rgb_only=False,
     ):
         self.root_dir = datadir
         self.downsample = downsample
@@ -36,6 +38,11 @@ class IMED_Dataset:
         self.stereo_calibration_dir = stereo_calibration_dir
         self.pretrain_keyframes = int(pretrain_keyframes)
         self.pretrain_max_points = int(pretrain_max_points)
+        self.use_principal_point = bool(use_principal_point)
+        self.stereo_right_rgb_only = bool(stereo_right_rgb_only)
+        assert not self.stereo_right_rgb_only or self.use_stereo, (
+            "imed_stereo_right_rgb_only requires imed_use_stereo"
+        )
         assert self.pretrain_keyframes >= 1, "imed_pretrain_keyframes must be >= 1"
         assert self.pretrain_max_points > 0, "imed_pretrain_max_points must be positive"
         assert not (use_source_overlap_mask and use_source_overlap_weight), (
@@ -394,6 +401,11 @@ class IMED_Dataset:
             source_overlap_mask=source_overlap_mask_t,
             stereo_pair_id=pair_id,
             stereo_eye=record["eye"],
+            cx=cx if self.use_principal_point else None,
+            cy=cy if self.use_principal_point else None,
+            depth_supervision=not (
+                record["eye"] == "R" and self.stereo_right_rgb_only
+            ),
         )
 
     def format_infos(self, split):

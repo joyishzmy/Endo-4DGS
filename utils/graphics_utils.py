@@ -51,7 +51,7 @@ def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     Rt = np.linalg.inv(C2W)
     return np.float32(Rt)
 
-def getProjectionMatrix(znear, zfar, fovX, fovY):
+def getProjectionMatrix(znear, zfar, fovX, fovY, cx=None, cy=None, width=None, height=None):
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))
 
@@ -68,6 +68,13 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     P[1, 1] = 2.0 * znear / (top - bottom)
     P[0, 2] = (right + left) / (right - left)
     P[1, 2] = (top + bottom) / (top - bottom)
+    if cx is not None or cy is not None:
+        if cx is None or cy is None or width is None or height is None:
+            raise ValueError("cx, cy, width and height must be provided together")
+        # CUDA rasterization maps NDC v to pixel ((v + 1) * size - 1) / 2.
+        # These offsets therefore reproduce u=fx*x/z+cx and v=fy*y/z+cy.
+        P[0, 2] = (2.0 * float(cx) + 1.0) / float(width) - 1.0
+        P[1, 2] = (2.0 * float(cy) + 1.0) / float(height) - 1.0
     P[3, 2] = z_sign
     P[2, 2] = z_sign * zfar / (zfar - znear)
     P[2, 3] = -(zfar * znear) / (zfar - znear)

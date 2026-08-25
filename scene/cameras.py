@@ -19,7 +19,8 @@ class Camera(nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
                  data_device = "cuda", time = 0, Znear=None, Zfar=None, pc=None,
-                 source_overlap_mask=None, stereo_pair_id=-1, stereo_eye="mono"
+                 source_overlap_mask=None, stereo_pair_id=-1, stereo_eye="mono",
+                 cx=None, cy=None, depth_supervision=True
                  ):
         super(Camera, self).__init__()
 
@@ -35,6 +36,9 @@ class Camera(nn.Module):
         self.source_overlap_mask = source_overlap_mask
         self.stereo_pair_id = stereo_pair_id
         self.stereo_eye = stereo_eye
+        self.cx = cx
+        self.cy = cy
+        self.depth_supervision = depth_supervision
         self.pc = pc
         try:
             self.data_device = torch.device(data_device)
@@ -63,12 +67,30 @@ class Camera(nn.Module):
         self.scale = scale
 
         self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1)
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)
+        self.projection_matrix = getProjectionMatrix(
+            znear=self.znear,
+            zfar=self.zfar,
+            fovX=self.FoVx,
+            fovY=self.FoVy,
+            cx=self.cx,
+            cy=self.cy,
+            width=self.image_width if self.cx is not None else None,
+            height=self.image_height if self.cy is not None else None,
+        ).transpose(0,1)
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         
     def get_scaled_transform(self, scale):
-        project_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx/scale, fovY=self.FoVy/scale).transpose(0,1)
+        project_matrix = getProjectionMatrix(
+            znear=self.znear,
+            zfar=self.zfar,
+            fovX=self.FoVx/scale,
+            fovY=self.FoVy/scale,
+            cx=self.cx,
+            cy=self.cy,
+            width=self.image_width if self.cx is not None else None,
+            height=self.image_height if self.cy is not None else None,
+        ).transpose(0,1)
         full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(project_matrix.unsqueeze(0))).squeeze(0)
         return project_matrix, full_proj_transform
         
