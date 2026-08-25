@@ -17,7 +17,7 @@ import torch
 import cv2
 from random import randint
 import traceback
-from utils.loss_utils import l1_loss, l2_loss
+from utils.loss_utils import l1_loss, l2_loss, robust_log_depth_loss
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -96,7 +96,24 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     test_cams = scene.getTestCameras()
     train_cams = scene.getTrainCameras()
 
-    if not viewpoint_stack and not opt.dataloader:
+    stereo_pairs = None
+    if mp.imed_use_stereo:
+        assert not opt.dataloader, "iMED paired stereo currently requires dataloader=False"
+        assert not opt.zerostamp_init, "iMED paired stereo is incompatible with zerostamp_init"
+        assert opt.batch_size == 2, "iMED paired stereo requires batch_size=2 (one L/R pair)"
+        pair_map = {}
+        for camera_index, camera_info in enumerate(train_cams.dataset):
+            pair_id = getattr(camera_info, "stereo_pair_id", -1)
+            eye = getattr(camera_info, "stereo_eye", "mono")
+            if pair_id < 0 or eye not in ("L", "R"):
+                raise ValueError("Stereo training camera is missing a valid pair id/eye")
+            pair_map.setdefault(pair_id, {})[eye] = camera_index
+        if not pair_map or any(set(pair) != {"L", "R"} for pair in pair_map.values()):
+            raise ValueError("Every iMED stereo timestamp must contain exactly one L and one R camera")
+        stereo_pairs = [(pair["L"], pair["R"]) for _, pair in sorted(pair_map.items())]
+        print(f"iMED paired stereo sampler: pairs={len(stereo_pairs)}, batch_size=2")
+
+    if not viewpoint_stack and not opt.dataloader and stereo_pairs is None:
         # dnerf's branch
         viewpoint_stack = [i for i in train_cams]
         temp_list = copy.deepcopy(viewpoint_stack)
@@ -150,7 +167,10 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             gaussians.oneupSHdegree()
 
         # dynerf's branch
-        if opt.dataloader and not load_in_memory:
+        if stereo_pairs is not None:
+            left_index, right_index = random.choice(stereo_pairs)
+            viewpoint_cams = [train_cams[left_index], train_cams[right_index]]
+        elif opt.dataloader and not load_in_memory:
             try:
                 viewpoint_cams = next(loader)
             except StopIteration:
@@ -300,15 +320,16 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             source_overlap_tensor = None
             rgb_loss_weight = mask_tensor
         
-        image_tensor = torch.cat(images,0) * mask_tensor
-        depth_tensor = torch.cat(depths, 0) * mask_tensor
-        gt_image_tensor = torch.cat(gt_images,0) * mask_tensor
-        gt_depth_tensor = torch.cat(gt_depths, 0) * mask_tensor
+        valid_mask = mask_tensor.unsqueeze(1)
+        image_tensor = torch.cat(images,0) * valid_mask
+        depth_tensor = torch.cat(depths, 0) * valid_mask
+        gt_image_tensor = torch.cat(gt_images,0) * valid_mask
+        gt_depth_tensor = torch.cat(gt_depths, 0) * valid_mask
         
         if use_normal:
-            gs_normal = torch.cat(gs_normal, 0) * mask_tensor
+            gs_normal = torch.cat(gs_normal, 0) * valid_mask
         if use_confidence:
-            confidences = torch.cat(confidences, 0) * mask_tensor
+            confidences = torch.cat(confidences, 0) * valid_mask
         
         # Loss
         Ll1 = l1_loss(image_tensor, gt_image_tensor, rgb_loss_weight.unsqueeze(1))
@@ -316,8 +337,13 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         # norm
         if use_depth:
             depth_weight = hyper.depth_weight
-            depth_loss = l1_loss(depth_tensor/(depth_tensor.max()+1e-6), gt_depth_tensor/(gt_depth_tensor.max()+1e-6), \
-                mask=mask_tensor.unsqueeze(0))*depth_weight
+            if mp.imed_metric_depth_loss:
+                depth_loss = robust_log_depth_loss(
+                    depth_tensor, gt_depth_tensor, valid_mask
+                ) * depth_weight
+            else:
+                depth_loss = l1_loss(depth_tensor/(depth_tensor.max()+1e-6), gt_depth_tensor/(gt_depth_tensor.max()+1e-6), \
+                    mask=valid_mask)*depth_weight
             loss = Ll1 + depth_loss 
         else:
             loss = Ll1
@@ -329,18 +355,18 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             
         if use_normal:
             normal_weight = hyper.normal_weight
-            pseudo_normal=get_pseudo_normal(gt_depth_tensor, mask_tensor.unsqueeze(0))
+            pseudo_normal=get_pseudo_normal(gt_depth_tensor, valid_mask)
             pseudo_normal = F.interpolate(pseudo_normal, gs_normal.shape[2:4])
-            normal_loss = mae_loss(gs_normal, pseudo_normal, mask_tensor)*normal_weight
+            normal_loss = mae_loss(gs_normal, pseudo_normal, valid_mask)*normal_weight
             loss += normal_loss
             
         if use_confidence:
             un_img_weight = hyper.un_img_weight
             un_dep_weight = hyper.un_dep_weight
             confidence_loss_img = confidence_loss(gt_image_tensor, image_tensor, \
-                confidences, mask_tensor.unsqueeze(0))*un_img_weight
+                confidences, valid_mask)*un_img_weight
             confidence_loss_dep = confidence_loss(gt_depth_tensor/gt_depth_tensor.max(), \
-                depth_tensor/depth_tensor.max(), confidences, mask_tensor.unsqueeze(0))*un_dep_weight
+                depth_tensor/depth_tensor.max(), confidences, valid_mask)*un_dep_weight
             loss += confidence_loss_img
             loss += confidence_loss_dep
             

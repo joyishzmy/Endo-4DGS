@@ -9,6 +9,7 @@ from torchvision import transforms as T
 import torch
 
 from utils.graphics_utils import focal2fov
+from utils.imed_stereo import project_left_depth_to_right, resolve_stereo_calibration
 from scene.pre_train_pc import get_pointcloud
 from scene.endo_loader import CameraInfo
 
@@ -21,12 +22,22 @@ class IMED_Dataset:
         load_test=True,
         use_source_overlap_mask=False,
         use_source_overlap_weight=False,
+        use_stereo=False,
+        stereo_calibration_dir="",
+        pretrain_keyframes=1,
+        pretrain_max_points=360000,
     ):
         self.root_dir = datadir
         self.downsample = downsample
         self.load_test = load_test
         self.use_source_overlap_mask = use_source_overlap_mask
         self.use_source_overlap_weight = use_source_overlap_weight
+        self.use_stereo = use_stereo
+        self.stereo_calibration_dir = stereo_calibration_dir
+        self.pretrain_keyframes = int(pretrain_keyframes)
+        self.pretrain_max_points = int(pretrain_max_points)
+        assert self.pretrain_keyframes >= 1, "imed_pretrain_keyframes must be >= 1"
+        assert self.pretrain_max_points > 0, "imed_pretrain_max_points must be positive"
         assert not (use_source_overlap_mask and use_source_overlap_weight), (
             "Hard source-overlap masking and soft source-overlap weighting are mutually exclusive"
         )
@@ -36,6 +47,14 @@ class IMED_Dataset:
         self._validate_structure()
         self.K_map = self._parse_intrinsics()
         self.c2w_map = self._parse_poses()
+        self.stereo_transform = None
+        self.stereo_calibration_path = None
+        if self.use_stereo:
+            self.stereo_transform, self.stereo_calibration_path = resolve_stereo_calibration(
+                self.stereo_calibration_dir,
+                self.root_dir,
+                expected_intrinsics={"K2_L": self.K_map["K2_L"], "K2_R": self.K_map["K2_R"]},
+            )
         self._load_streams()
 
         self.train_idxs = list(range(len(self.train_records)))
@@ -50,6 +69,11 @@ class IMED_Dataset:
             for subdir in ("L", "depthL", "toolL"):
                 path = os.path.join(self.root_dir, scope, subdir)
                 assert os.path.isdir(path), f"Missing required folder: {path}"
+        if self.use_stereo:
+            # Competition guard: stereo training may only consume Endoscope 2.
+            for subdir in ("R", "toolR"):
+                path = os.path.join(self.root_dir, "endoscope2", subdir)
+                assert os.path.isdir(path), f"Missing required stereo source folder: {path}"
 
     def _parse_intrinsics(self):
         k_path = os.path.join(self.root_dir, "K.txt")
@@ -77,7 +101,10 @@ class IMED_Dataset:
                 continue
             i += 1
 
-        for needed in ("K1_L", "K2_L"):
+        needed_keys = ["K1_L", "K2_L"]
+        if self.use_stereo:
+            needed_keys.append("K2_R")
+        for needed in needed_keys:
             assert needed in matrices, f"Missing intrinsics {needed} in K.txt"
         return matrices
 
@@ -141,14 +168,47 @@ class IMED_Dataset:
                     "rgb": rgb_paths[i],
                     "depth": depth_paths[i],
                     "mask": None if masks_missing else mask_paths[i],
+                    "eye": "L",
                 }
             )
         return records
 
+    def _collect_right_stream(self):
+        """Collect synchronized Endoscope-2 right images without target access."""
+        scope_dir = os.path.join(self.root_dir, "endoscope2")
+        rgb_paths = sorted(glob.glob(os.path.join(scope_dir, "R", "*.png")))
+        mask_paths = sorted(glob.glob(os.path.join(scope_dir, "toolR", "*.png")))
+        assert rgb_paths, "No RGB frames found in endoscope2/R"
+        masks_missing = len(mask_paths) == 0
+        if masks_missing:
+            warnings.warn(
+                "No tool masks found in endoscope2/toolR; using an all-valid mask in memory.",
+                RuntimeWarning,
+            )
+        else:
+            assert len(rgb_paths) == len(mask_paths), "RGB/mask count mismatch in endoscope2/R"
+        rgb_ids = [self._extract_frame_id(path) for path in rgb_paths]
+        if not masks_missing:
+            mask_ids = [self._extract_frame_id(path) for path in mask_paths]
+            assert rgb_ids == mask_ids, "RGB/mask frame ids mismatch in endoscope2/R"
+        return [
+            {
+                "frame_id": frame_id,
+                "rgb": rgb,
+                "mask": None if masks_missing else mask_paths[index],
+                "eye": "R",
+            }
+            for index, (frame_id, rgb) in enumerate(zip(rgb_ids, rgb_paths))
+        ]
+
     def _load_streams(self):
         self.train_records = self._collect_stream("endoscope2")
+        self.right_records = self._collect_right_stream() if self.use_stereo else []
         self.test_records = self._collect_stream("endoscope1") if self.load_test else []
         train_ids = [r["frame_id"] for r in self.train_records]
+        if self.use_stereo:
+            right_ids = [r["frame_id"] for r in self.right_records]
+            assert train_ids == right_ids, "Endoscope-2 L/R frame ids must align exactly"
         if self.load_test:
             test_ids = [r["frame_id"] for r in self.test_records]
             assert train_ids == test_ids, "Train/test camera frame ids must align exactly"
@@ -164,6 +224,13 @@ class IMED_Dataset:
         self.scale_x = self.W_rgb // self.W
         assert self.scale_x == self.scale_y, "Anisotropic RGB/depth scaling is not supported"
         assert self.scale_x == 2, "Expected 2x RGB-to-depth scaling for IMED sequence"
+        if self.use_stereo:
+            right_img = np.array(Image.open(self.right_records[0]["rgb"]))
+            assert right_img.shape == first_img.shape, "Endoscope-2 L/R RGB resolutions differ"
+            print(
+                "iMED source-only stereo enabled: "
+                f"pairs={len(self.train_records)}, calibration={self.stereo_calibration_path}"
+            )
 
     def _load_mask(self, mask_path):
         raw = np.array(Image.open(mask_path))
@@ -199,7 +266,13 @@ class IMED_Dataset:
             return np.ones((self.H, self.W), dtype=np.bool_)
         return self._load_resized_mask(record["mask"])
 
-    def _build_source_overlap_mask(self, depth):
+    def _scaled_intrinsics(self, key):
+        K = self.K_map[key].astype(np.float64).copy()
+        K[0, :] /= self.downsample * self.scale_x
+        K[1, :] /= self.downsample * self.scale_y
+        return K
+
+    def _build_source_overlap_mask(self, depth, c2w=None, K=None):
         """Return Endoscope2 pixels whose 3D points project into Endoscope1."""
         assert depth.shape == (self.H, self.W), "Depth shape mismatch for overlap mask"
 
@@ -212,18 +285,20 @@ class IMED_Dataset:
         source_v, source_u = np.divmod(valid_flat, self.W)
         z2 = depth.reshape(-1)[valid_flat].astype(np.float64)
 
-        K2 = self.K_map["K2_L"].astype(np.float64).copy()
-        K1 = self.K_map["K1_L"].astype(np.float64).copy()
-        K2[0, :] /= self.downsample * self.scale_x
-        K2[1, :] /= self.downsample * self.scale_y
-        K1[0, :] /= self.downsample * self.scale_x
-        K1[1, :] /= self.downsample * self.scale_y
+        if K is None:
+            K2 = self._scaled_intrinsics("K2_L")
+        else:
+            K2 = np.asarray(K, dtype=np.float64).copy()
+            K2[0, :] /= self.downsample * self.scale_x
+            K2[1, :] /= self.downsample * self.scale_y
+        K1 = self._scaled_intrinsics("K1_L")
 
         x2 = (source_u.astype(np.float64) - K2[0, 2]) * z2 / K2[0, 0]
         y2 = (source_v.astype(np.float64) - K2[1, 2]) * z2 / K2[1, 1]
         points_cam2 = np.stack((x2, y2, z2, np.ones_like(z2)), axis=1)
 
-        cam2_to_cam1 = np.linalg.inv(self.c2w_map["cam1"]) @ self.c2w_map["cam2"]
+        source_c2w = self.c2w_map["cam2"] if c2w is None else c2w
+        cam2_to_cam1 = np.linalg.inv(self.c2w_map["cam1"]) @ source_c2w
         points_cam1 = (cam2_to_cam1.astype(np.float64) @ points_cam2.T).T[:, :3]
         z1 = points_cam1[:, 2]
         in_front = np.isfinite(points_cam1).all(axis=1) & (z1 > 1e-6)
@@ -246,15 +321,28 @@ class IMED_Dataset:
         overlap_flat[valid_flat[inside]] = True
         return overlap_flat.reshape(self.H, self.W)
 
-    def _record_to_camera(self, record, c2w, K, time_val, uid, source_overlap_mode="off"):
+    def _record_to_camera(self, record, c2w, K, time_val, uid, source_overlap_mode="off", pair_id=-1):
         color = self._load_resized_rgb(record["rgb"])
-        depth = np.load(record["depth"]).astype(np.float32)
-        assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
-        mask = self._load_record_mask(record)
+        if record["eye"] == "L":
+            depth = np.load(record["depth"]).astype(np.float32)
+            assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
+            mask = self._load_record_mask(record)
+        else:
+            left_record = self.train_records[pair_id]
+            depth_l = np.load(left_record["depth"]).astype(np.float32)
+            valid_l = self._load_record_mask(left_record)
+            depth, projected_valid = project_left_depth_to_right(
+                depth_l,
+                valid_l,
+                self._scaled_intrinsics("K2_L"),
+                self._scaled_intrinsics("K2_R"),
+                self.stereo_transform,
+            )
+            mask = self._load_record_mask(record) & projected_valid
         assert mask.shape == (self.H, self.W), f"Mask shape mismatch for {record['rgb']}"
         source_overlap_mask = None
         if source_overlap_mode != "off":
-            overlap_mask = self._build_source_overlap_mask(depth)
+            overlap_mask = self._build_source_overlap_mask(depth, c2w=c2w, K=K)
             tool_free_fraction = float(mask.mean())
             source_visible_fraction = float(overlap_mask.mean())
             effective_fraction = float((mask & overlap_mask).mean())
@@ -304,6 +392,8 @@ class IMED_Dataset:
             Znear=None,
             pc=None,
             source_overlap_mask=source_overlap_mask_t,
+            stereo_pair_id=pair_id,
+            stereo_eye=record["eye"],
         )
 
     def format_infos(self, split):
@@ -336,8 +426,22 @@ class IMED_Dataset:
                     time_val,
                     idx,
                     source_overlap_mode=source_overlap_mode,
+                    pair_id=idx if split == "train" else -1,
                 )
             )
+            if split == "train" and self.use_stereo:
+                right_c2w = self.c2w_map["cam2"] @ np.linalg.inv(self.stereo_transform)
+                cams.append(
+                    self._record_to_camera(
+                        self.right_records[idx],
+                        right_c2w,
+                        self.K_map["K2_R"],
+                        time_val,
+                        n + idx,
+                        source_overlap_mode=source_overlap_mode,
+                        pair_id=idx,
+                    )
+                )
         if source_overlap_mode != "off" and self._source_overlap_stats:
             stats = np.asarray(self._source_overlap_stats, dtype=np.float64)
             label = "source-overlap training mask" if source_overlap_mode == "hard" else "soft-overlap geometry"
@@ -351,11 +455,8 @@ class IMED_Dataset:
         return cams
 
     def get_pretrain_pcd(self):
-        first = self.train_records[0]
-        color = self._load_resized_rgb(first["rgb"]).transpose(2, 0, 1)
-        depth = np.load(first["depth"]).astype(np.float32)[None, ...]
-        mask = self._load_record_mask(first)[None, ...]
-
+        keyframe_count = min(self.pretrain_keyframes, len(self.train_records))
+        keyframe_ids = np.linspace(0, len(self.train_records) - 1, keyframe_count, dtype=np.int64)
         K = self.K_map["K2_L"]
         intrinsics = [
             float(K[0, 0]) / self.scale_x,
@@ -364,8 +465,26 @@ class IMED_Dataset:
             float(K[1, 2]) / self.scale_y,
         ]
         w2c = np.linalg.inv(self.c2w_map["cam2"])
-        pts, cols = get_pointcloud(color, depth, intrinsics, w2c, mask=mask)
+        points, colors = [], []
+        for idx in keyframe_ids:
+            record = self.train_records[int(idx)]
+            color = self._load_resized_rgb(record["rgb"]).transpose(2, 0, 1)
+            depth = np.load(record["depth"]).astype(np.float32)[None, ...]
+            mask = self._load_record_mask(record)[None, ...]
+            pts_i, cols_i = get_pointcloud(color, depth, intrinsics, w2c, mask=mask)
+            points.append(pts_i)
+            colors.append(cols_i)
+        pts = np.concatenate(points, axis=0)
+        cols = np.concatenate(colors, axis=0)
+        if pts.shape[0] > self.pretrain_max_points:
+            # Deterministic spatially uniform subsampling for reproducibility.
+            keep = np.linspace(0, pts.shape[0] - 1, self.pretrain_max_points, dtype=np.int64)
+            pts, cols = pts[keep], cols[keep]
         assert pts.shape[0] > 0, "Pretrain point cloud is empty"
+        print(
+            f"iMED pretrain point cloud: keyframes={keyframe_count}, "
+            f"points={pts.shape[0]}, frame_ids={[self.train_records[int(i)]['frame_id'] for i in keyframe_ids]}"
+        )
         normals = np.zeros((pts.shape[0], 3), dtype=np.float32)
         return pts, cols, normals
 

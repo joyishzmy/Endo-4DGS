@@ -19,7 +19,7 @@ class Camera(nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
                  data_device = "cuda", time = 0, Znear=None, Zfar=None, pc=None,
-                 source_overlap_mask=None
+                 source_overlap_mask=None, stereo_pair_id=-1, stereo_eye="mono"
                  ):
         super(Camera, self).__init__()
 
@@ -33,6 +33,8 @@ class Camera(nn.Module):
         self.time = time
         self.mask = mask
         self.source_overlap_mask = source_overlap_mask
+        self.stereo_pair_id = stereo_pair_id
+        self.stereo_eye = stereo_eye
         self.pc = pc
         try:
             self.data_device = torch.device(data_device)

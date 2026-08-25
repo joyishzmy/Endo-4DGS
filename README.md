@@ -74,6 +74,20 @@ This setup measures cross-camera generalization rather than interpolation within
 
 For iMED two-camera evaluation, PSNR/SSIM are computed on the valid reprojection region from `endoscope2` into `endoscope1` (single global mask per sequence).
 
+### Source-only Endoscope-2 stereo experiment
+
+The optional stereo path uses only synchronized `endoscope2/L`, `endoscope2/R`,
+`endoscope2/depthL`, `endoscope2/toolL`, `endoscope2/toolR`, `K2_L`, and `K2_R`
+during training. It never reads Endoscope-1 images. Because the package does not
+provide an explicit Endoscope-2 L/R extrinsic, first run
+`scripts/estimate_imed_stereo_extrinsics.py`. The resulting calibration is stored
+outside the original dataset under `calibration/imed/`; training refuses files
+that do not certify source-only provenance or fail geometric validation.
+
+`scripts/run_imed_stereo_rgbd_pilot.sh` performs a paired-seed two-sequence pilot:
+the frozen gate090 baseline, robust RGB-D/multi-keyframe initialization (`G1`),
+and synchronized L/R supervision with projected right pseudo-depth (`G2`).
+
 ## Setup
 
 ```bash

@@ -87,6 +87,19 @@ def l1_loss(network_output, gt, mask=None):
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 
+
+def robust_log_depth_loss(prediction, target, mask, eps=1e-3):
+    """Robust, scale-aware metric depth loss over explicitly valid pixels."""
+    if mask.ndim == 3:
+        mask = mask.unsqueeze(1)
+    valid = mask.bool() & torch.isfinite(prediction) & torch.isfinite(target)
+    valid &= (prediction > 0) & (target > 0)
+    if not valid.any():
+        return prediction.sum() * 0.0
+    residual = torch.log(prediction[valid].clamp_min(eps)) - torch.log(target[valid].clamp_min(eps))
+    # Charbonnier penalty is less sensitive to pseudo-depth errors near stereo occlusions.
+    return torch.sqrt(residual.square() + eps * eps).mean()
+
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
     return gauss / gauss.sum()
@@ -383,7 +396,10 @@ class GradL1Loss(nn.Module):
         self.pc_loss = PearsonCorrCoef().cuda()
 
     def forward(self, input, target, mask=None, interpolate=True, return_interpolated=False):
-        mask = mask[None]
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+        elif mask.ndim != 4:
+            raise ValueError(f"GradL1Loss expects BxHxW or Bx1xHxW mask, got {tuple(mask.shape)}")
         input = extract_key(input, KEY_OUTPUT)
         if input.shape[-1] != target.shape[-1] and interpolate:
             input = nn.functional.interpolate(

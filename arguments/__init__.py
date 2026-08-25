@@ -64,6 +64,11 @@ class ModelParams(ParamGroup):
         self.imed_source_overlap_weight=False
         self.imed_source_overlap_visibility_threshold=1.0
         self.imed_source_overlap_anneal_start=-1
+        self.imed_use_stereo=False
+        self.imed_stereo_calibration_dir=""
+        self.imed_metric_depth_loss=False
+        self.imed_pretrain_keyframes=1
+        self.imed_pretrain_max_points=360000
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
