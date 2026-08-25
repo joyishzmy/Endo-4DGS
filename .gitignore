@@ -16,5 +16,6 @@ __pycache__/
 reconstruct/
 *.so
 data/
+/data
 calibration/imed/*.json
 pretrained_gaussians/StereoMIS_0_0_1/
