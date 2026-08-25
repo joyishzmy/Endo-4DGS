@@ -39,7 +39,11 @@ def resolve_stereo_calibration(calibration_dir, sequence_dir, expected_intrinsic
         stored_intrinsics = payload.get("intrinsics", {})
         for key, expected in expected_intrinsics.items():
             stored = np.asarray(stored_intrinsics.get(key), dtype=np.float64)
-            if stored.shape != (3, 3) or not np.allclose(stored, expected, rtol=0.0, atol=1e-5):
+            # K.txt is parsed as float32 by the training loader while the
+            # calibration JSON preserves float64 values. Allow only the
+            # expected float32 round-off (about 1e-4 at focal length ~1000),
+            # while still rejecting a calibration from another sequence.
+            if stored.shape != (3, 3) or not np.allclose(stored, expected, rtol=1e-6, atol=1e-4):
                 raise ValueError(f"Calibration intrinsics {key} do not match the sequence K.txt: {path}")
 
     transform = np.asarray(payload.get("transform_R_from_L"), dtype=np.float64)
