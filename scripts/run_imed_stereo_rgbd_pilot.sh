@@ -2,9 +2,10 @@
 
 set -uo pipefail
 
-REPO_ROOT="/home/login/Documents/ZMY/imed4dgs"
-PYTHON_BIN="/home/login/Documents/ZMY/conda-envs/imed4dgs/bin/python"
-DATA_ROOT="${REPO_ROOT}/data/imed"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHON_BIN="${IMED_PYTHON_BIN:-/home/login/Documents/ZMY/conda-envs/imed4dgs/bin/python}"
+DATA_ROOT="${IMED_DATA_ROOT:-${REPO_ROOT}/data/imed}"
 CALIBRATION_ROOT="${REPO_ROOT}/calibration/imed"
 OUT_ROOT="${REPO_ROOT}/output/ablation/stereo_rgbd_pilot_v1"
 PORT="${IMED_PORT:-6033}"
