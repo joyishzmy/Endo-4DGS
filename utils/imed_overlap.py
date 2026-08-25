@@ -9,6 +9,33 @@ class IMEDSoftOverlapWeight(NamedTuple):
     active: torch.Tensor
 
 
+def imed_soft_overlap_anneal_alpha(
+    stage,
+    iteration,
+    final_iteration,
+    anneal_start=-1,
+):
+    """Return the soft-weight blend factor for late fine-stage refinement."""
+    if anneal_start < 0 or stage != "fine":
+        return 1.0
+    if final_iteration <= anneal_start:
+        raise ValueError("final_iteration must be greater than anneal_start")
+    if iteration <= anneal_start:
+        return 1.0
+    return max(
+        0.0,
+        min(1.0, (final_iteration - iteration) / (final_iteration - anneal_start)),
+    )
+
+
+def blend_imed_soft_overlap_weight(tool_mask, soft_weight, alpha):
+    """Blend normalized soft weights back to the original baseline mask."""
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be in [0, 1]")
+    valid = tool_mask.float()
+    return valid + alpha * (soft_weight - valid)
+
+
 def build_imed_soft_overlap_weight(
     tool_mask,
     source_overlap_mask,

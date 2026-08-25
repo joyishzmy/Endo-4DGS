@@ -36,7 +36,11 @@ from utils.loader_utils import FineSampler, get_stamp_list
 from utils.scene_utils import render_training_image
 from utils.loss_utils import GradL1Loss, confidence_loss, TV_loss
 from utils.graphics_utils import get_pseudo_normal
-from utils.imed_overlap import build_imed_soft_overlap_weight
+from utils.imed_overlap import (
+    blend_imed_soft_overlap_weight,
+    build_imed_soft_overlap_weight,
+    imed_soft_overlap_anneal_alpha,
+)
 from time import time
 import copy
 import open3d as o3d
@@ -250,7 +254,17 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 source_overlap_tensor,
                 mp.imed_source_overlap_visibility_threshold,
             )
-            rgb_loss_weight = soft_overlap.weight
+            soft_overlap_alpha = imed_soft_overlap_anneal_alpha(
+                stage,
+                iteration,
+                final_iter,
+                mp.imed_source_overlap_anneal_start,
+            )
+            rgb_loss_weight = blend_imed_soft_overlap_weight(
+                mask_tensor,
+                soft_overlap.weight,
+                soft_overlap_alpha,
+            )
             if not soft_overlap_logged:
                 valid_weights = rgb_loss_weight[mask_tensor.bool()]
                 sum_ratio = rgb_loss_weight.sum() / mask_tensor.float().sum().clamp_min(1.0)
@@ -262,11 +276,26 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                     f"raw_visibility_min={soft_overlap.raw_visibility.min().item():.4f}, "
                     f"raw_visibility_max={soft_overlap.raw_visibility.max().item():.4f}, "
                     f"active_frames={active_count}/{frame_count}, "
+                    f"anneal_alpha={soft_overlap_alpha:.4f}, "
                     f"min={valid_weights.min().item():.4f}, "
                     f"max={valid_weights.max().item():.4f}, "
                     f"sum_ratio={sum_ratio.item():.4f}"
                 )
                 soft_overlap_logged = True
+            if (
+                stage == "fine"
+                and mp.imed_source_overlap_anneal_start >= 0
+                and iteration in {
+                    mp.imed_source_overlap_anneal_start,
+                    (mp.imed_source_overlap_anneal_start + final_iter) // 2,
+                    final_iter - 1,
+                }
+            ):
+                print(
+                    "iMED soft-overlap late annealing: "
+                    f"iteration={iteration}/{final_iter}, "
+                    f"alpha={soft_overlap_alpha:.4f}"
+                )
         else:
             source_overlap_tensor = None
             rgb_loss_weight = mask_tensor

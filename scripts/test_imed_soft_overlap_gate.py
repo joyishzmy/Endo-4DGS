@@ -7,7 +7,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from utils.imed_overlap import build_imed_soft_overlap_weight
+from utils.imed_overlap import (
+    blend_imed_soft_overlap_weight,
+    build_imed_soft_overlap_weight,
+    imed_soft_overlap_anneal_alpha,
+)
 
 
 tool_mask = torch.tensor(
@@ -36,5 +40,20 @@ assert torch.allclose(
 )
 assert not torch.equal(result.weight[0], tool_mask[0].float())
 assert torch.count_nonzero(result.weight[~tool_mask]) == 0
+
+assert imed_soft_overlap_anneal_alpha("coarse", 2500, 2500, 2000) == 1.0
+assert imed_soft_overlap_anneal_alpha("fine", 2000, 2500, 2000) == 1.0
+assert imed_soft_overlap_anneal_alpha("fine", 2250, 2500, 2000) == 0.5
+assert imed_soft_overlap_anneal_alpha("fine", 2500, 2500, 2000) == 0.0
+
+half_weight = blend_imed_soft_overlap_weight(tool_mask, result.weight, 0.5)
+assert torch.allclose(
+    half_weight.sum(dim=spatial_dims),
+    tool_mask.float().sum(dim=spatial_dims),
+)
+assert torch.equal(
+    blend_imed_soft_overlap_weight(tool_mask, result.weight, 0.0),
+    tool_mask.float(),
+)
 
 print("iMED soft-overlap gate tests passed")
