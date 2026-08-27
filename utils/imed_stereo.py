@@ -57,7 +57,14 @@ def resolve_stereo_calibration(calibration_dir, sequence_dir, expected_intrinsic
     return transform.astype(np.float32), path
 
 
-def project_left_depth_to_right(depth_l, valid_l, K_l, K_r, transform_r_from_l):
+def project_left_depth_to_right(
+    depth_l,
+    valid_l,
+    K_l,
+    K_r,
+    transform_r_from_l,
+    return_source_indices=False,
+):
     """Forward-project left depth into the synchronized right camera.
 
     A nearest-pixel z-buffer is deliberately used: only geometrically observed
@@ -72,8 +79,10 @@ def project_left_depth_to_right(depth_l, valid_l, K_l, K_r, transform_r_from_l):
     valid = valid_l & np.isfinite(depth_l) & (depth_l > 0)
     flat = np.flatnonzero(valid.reshape(-1))
     depth_r = np.zeros((height, width), dtype=np.float32)
+    source_indices_r = np.full((height, width), -1, dtype=np.int64)
     if flat.size == 0:
-        return depth_r, depth_r.astype(np.bool_)
+        result = (depth_r, depth_r.astype(np.bool_))
+        return result + (source_indices_r,) if return_source_indices else result
 
     v_l, u_l = np.divmod(flat, width)
     z_l = depth_l.reshape(-1)[flat].astype(np.float64)
@@ -94,12 +103,69 @@ def project_left_depth_to_right(depth_l, valid_l, K_l, K_r, transform_r_from_l):
     v_r[in_front] = np.rint(K_r[1, 1] * points_r[in_front, 1] / z_r[in_front] + K_r[1, 2]).astype(np.int64)
     inside = in_front & (u_r >= 0) & (u_r < width) & (v_r >= 0) & (v_r < height)
     if not inside.any():
-        return depth_r, depth_r.astype(np.bool_)
+        result = (depth_r, depth_r.astype(np.bool_))
+        return result + (source_indices_r,) if return_source_indices else result
 
     target_flat = v_r[inside] * width + u_r[inside]
     z_values = z_r[inside].astype(np.float32)
-    z_buffer = np.full(height * width, np.inf, dtype=np.float32)
-    np.minimum.at(z_buffer, target_flat, z_values)
-    visible = np.isfinite(z_buffer)
-    depth_r.reshape(-1)[visible] = z_buffer[visible]
-    return depth_r, visible.reshape(height, width)
+    source_flat = flat[inside]
+    # Sort by target pixel and then depth. The first entry for each target is
+    # the z-buffer winner, and its source index lets us project synchronized
+    # left RGB without inventing values in forward-warp holes.
+    order = np.lexsort((z_values, target_flat))
+    sorted_targets = target_flat[order]
+    first = np.r_[True, sorted_targets[1:] != sorted_targets[:-1]]
+    winners = order[first]
+    selected_targets = target_flat[winners]
+    depth_r.reshape(-1)[selected_targets] = z_values[winners]
+    source_indices_r.reshape(-1)[selected_targets] = source_flat[winners]
+    visible = source_indices_r >= 0
+    result = (depth_r, visible)
+    return result + (source_indices_r,) if return_source_indices else result
+
+
+def build_stereo_photometric_weight(
+    left_rgb,
+    right_rgb,
+    source_indices_r,
+    valid_r,
+    sigma=0.10,
+):
+    """Build a detached right-view confidence map from synchronized source RGB.
+
+    A robust per-channel affine alignment removes global exposure/white-balance
+    differences. Residual disagreement then receives a smooth exponential
+    weight. Invalid/occluded forward-warp pixels remain exactly zero.
+    """
+    left_rgb = np.asarray(left_rgb, dtype=np.float32)
+    right_rgb = np.asarray(right_rgb, dtype=np.float32)
+    source_indices_r = np.asarray(source_indices_r, dtype=np.int64)
+    valid_r = np.asarray(valid_r, dtype=np.bool_)
+    if left_rgb.shape != right_rgb.shape or left_rgb.ndim != 3 or left_rgb.shape[2] != 3:
+        raise ValueError("left_rgb and right_rgb must be aligned HxWx3 arrays")
+    if source_indices_r.shape != left_rgb.shape[:2] or valid_r.shape != left_rgb.shape[:2]:
+        raise ValueError("source_indices_r and valid_r must match the image shape")
+    if not np.isfinite(sigma) or sigma <= 0:
+        raise ValueError("sigma must be positive")
+
+    valid = valid_r & (source_indices_r >= 0)
+    weight = np.zeros(valid.shape, dtype=np.float32)
+    target_flat = np.flatnonzero(valid.reshape(-1))
+    if target_flat.size == 0:
+        return weight
+
+    source_flat = source_indices_r.reshape(-1)[target_flat]
+    projected = left_rgb.reshape(-1, 3)[source_flat].astype(np.float64)
+    target = right_rgb.reshape(-1, 3)[target_flat].astype(np.float64)
+
+    source_center = np.median(projected, axis=0)
+    target_center = np.median(target, axis=0)
+    source_scale = 1.4826 * np.median(np.abs(projected - source_center), axis=0)
+    target_scale = 1.4826 * np.median(np.abs(target - target_center), axis=0)
+    scale_ratio = np.clip(target_scale / np.maximum(source_scale, 1e-3), 0.5, 2.0)
+    aligned = np.clip((projected - source_center) * scale_ratio + target_center, 0.0, 1.0)
+
+    residual = np.mean(np.abs(aligned - target), axis=1)
+    confidence = np.exp(-residual / float(sigma))
+    weight.reshape(-1)[target_flat] = confidence.astype(np.float32)
+    return weight

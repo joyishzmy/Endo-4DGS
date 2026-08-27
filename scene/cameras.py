@@ -20,7 +20,7 @@ class Camera(nn.Module):
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
                  data_device = "cuda", time = 0, Znear=None, Zfar=None, pc=None,
                  source_overlap_mask=None, stereo_pair_id=-1, stereo_eye="mono",
-                 cx=None, cy=None, depth_supervision=True
+                 cx=None, cy=None, depth_supervision=True, stereo_rgb_weight=None
                  ):
         super(Camera, self).__init__()
 
@@ -39,6 +39,7 @@ class Camera(nn.Module):
         self.cx = cx
         self.cy = cy
         self.depth_supervision = depth_supervision
+        self.stereo_rgb_weight = stereo_rgb_weight
         self.pc = pc
         try:
             self.data_device = torch.device(data_device)

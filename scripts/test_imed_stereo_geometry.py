@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.imed_stereo import (
     CALIBRATION_FORMAT,
+    build_stereo_photometric_weight,
     project_left_depth_to_right,
     resolve_stereo_calibration,
 )
@@ -31,6 +32,25 @@ depth_varying = depth.copy()
 depth_varying[1, :] = [4.0, 3.0, 2.0, 1.0]
 projected, mask = project_left_depth_to_right(depth_varying, valid, K, K_collapse, identity)
 assert projected[1][mask[1]].min() == 1.0
+
+# Identity geometry and exposure-aligned images should retain high confidence,
+# while a locally corrupted right observation must be downweighted.
+left_rgb = np.linspace(0.1, 0.9, 36, dtype=np.float32).reshape(3, 4, 3)
+_, projected_valid, source_indices = project_left_depth_to_right(
+    depth, valid, K, K, identity, return_source_indices=True
+)
+right_rgb = np.clip(left_rgb * 1.2 + 0.05, 0.0, 1.0)
+clean_weight = build_stereo_photometric_weight(
+    left_rgb, right_rgb, source_indices, projected_valid, sigma=0.10
+)
+assert clean_weight[projected_valid].mean() > 0.95
+corrupt_right = right_rgb.copy()
+corrupt_right[1, 2] = 0.0
+corrupt_weight = build_stereo_photometric_weight(
+    left_rgb, corrupt_right, source_indices, projected_valid, sigma=0.10
+)
+assert corrupt_weight[1, 2] < clean_weight[1, 2]
+assert np.all(corrupt_weight[~projected_valid] == 0)
 
 # Calibration files retain float64 intrinsics, whereas the loader uses
 # float32. This round-off must pass, but a genuinely different K must fail.

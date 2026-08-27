@@ -95,6 +95,12 @@ right-view visibility but is excluded from depth, normal, smoothness, and depth
 confidence losses. The script reruns a principal-point baseline and G1 control,
 so results are paired rather than compared against legacy centered projections.
 
+The G3 pilot is `scripts/run_imed_stereo_photogate_g3.sh`. It keeps the full
+left RGB-D objective and treats the synchronized right view only as a detached,
+exposure-aligned, photometrically gated auxiliary RGB loss. Right-view depth,
+normal, confidence, and smoothness supervision remain disabled. It reuses the
+seed-1 `baseline_pp` and `g2v2_rgb` controls from the v2 pilot.
+
 ## Setup
 
 ```bash

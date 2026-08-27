@@ -52,6 +52,7 @@ class CameraInfo(NamedTuple):
     cx: float = None
     cy: float = None
     depth_supervision: bool = True
+    stereo_rgb_weight: np.array = None
 
 def normalize(v):
     """Normalize a vector."""

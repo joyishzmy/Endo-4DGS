@@ -512,6 +512,8 @@ def readIMEDInfo(
     pretrain_max_points=360000,
     use_principal_point=False,
     stereo_right_rgb_only=False,
+    stereo_photometric_gate=False,
+    stereo_photometric_sigma=0.10,
 ):
     from scene.imed_loader import IMED_Dataset
 
@@ -533,6 +535,10 @@ def readIMEDInfo(
         stereo_right_rgb_only=(
             stereo_right_rgb_only and use_stereo and not load_test_cameras
         ),
+        stereo_photometric_gate=(
+            stereo_photometric_gate and use_stereo and not load_test_cameras
+        ),
+        stereo_photometric_sigma=stereo_photometric_sigma,
     )
     train_cam_infos = imed_dataset.format_infos(split="train")
     test_cam_infos = imed_dataset.format_infos(split="test") if load_test_cameras else []

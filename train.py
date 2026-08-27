@@ -90,6 +90,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     viewpoint_stack = None
     final_iter = train_iter
     soft_overlap_logged = False
+    stereo_gate_logged = False
     
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training")
     first_iter += 1
@@ -127,6 +128,20 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 if getattr(train_cams.dataset[right_index], "depth_supervision", True):
                     raise ValueError("RGB-only mode must disable right pseudo-depth supervision")
             print("iMED right camera supervision: RGB only; pseudo-depth is visibility-only")
+        if mp.imed_stereo_photometric_gate:
+            if not mp.imed_stereo_right_rgb_only:
+                raise ValueError("Photometric gating requires right RGB-only supervision")
+            if not (0.0 <= mp.imed_stereo_right_loss_weight <= 1.0):
+                raise ValueError("Right stereo auxiliary loss weight must be in [0, 1]")
+            for left_index, right_index in stereo_pairs:
+                if getattr(train_cams.dataset[left_index], "stereo_rgb_weight", None) is not None:
+                    raise ValueError("Left cameras must not have a stereo photometric gate")
+                if getattr(train_cams.dataset[right_index], "stereo_rgb_weight", None) is None:
+                    raise ValueError("Right cameras are missing stereo photometric gates")
+            print(
+                "iMED right camera loss: detached photometric gate, "
+                f"aux_weight={mp.imed_stereo_right_loss_weight:.4f}"
+            )
         print(f"iMED paired stereo sampler: pairs={len(stereo_pairs)}, batch_size=2")
 
     if not viewpoint_stack and not opt.dataloader and stereo_pairs is None:
@@ -217,6 +232,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         depths = []
         masks = []
         depth_supervision_masks = []
+        stereo_rgb_weights = []
         source_overlap_masks = []
         radii_list = []
         visibility_filter_list = []
@@ -258,6 +274,13 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                     depth_supervision_masks.append(mask.unsqueeze(0))
                 else:
                     depth_supervision_masks.append(torch.zeros_like(mask).unsqueeze(0))
+                if mp.imed_stereo_photometric_gate:
+                    stereo_rgb_weight = getattr(viewpoint_cam, "stereo_rgb_weight", None)
+                    if stereo_rgb_weight is None:
+                        stereo_rgb_weight = torch.ones_like(mask, dtype=torch.float32)
+                    else:
+                        stereo_rgb_weight = stereo_rgb_weight.cuda().float()
+                    stereo_rgb_weights.append(stereo_rgb_weight.unsqueeze(0))
             source_overlap_mask = getattr(viewpoint_cam, "source_overlap_mask", None)
             if source_overlap_mask is not None:
                 source_overlap_masks.append(source_overlap_mask.cuda().unsqueeze(0))
@@ -284,9 +307,15 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         if len(masks) != 0:
             mask_tensor = torch.cat(masks, 0)
             depth_supervision_tensor = torch.cat(depth_supervision_masks, 0)
+            stereo_rgb_weight_tensor = (
+                torch.cat(stereo_rgb_weights, 0)
+                if stereo_rgb_weights
+                else None
+            )
         else:
             mask_tensor = None
             depth_supervision_tensor = None
+            stereo_rgb_weight_tensor = None
         if source_overlap_masks:
             assert len(source_overlap_masks) == len(viewpoint_cams), (
                 "Soft source-overlap masks must be present for every camera in a batch"
@@ -354,50 +383,99 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             gs_normal = torch.cat(gs_normal, 0) * valid_mask
         if use_confidence:
             confidences = torch.cat(confidences, 0) * valid_mask
+
+        # In G3 the synchronized right view is an auxiliary appearance cue.
+        # All original RGB-D/normal/confidence regularizers retain the exact
+        # left-view batch semantics of the principal-point baseline.
+        primary_slice = slice(0, 1) if mp.imed_stereo_photometric_gate else slice(None)
+        primary_depth = depth_tensor[primary_slice]
+        primary_gt_depth = gt_depth_tensor[primary_slice]
+        primary_depth_mask = depth_valid_mask[primary_slice]
         
         # Loss
-        Ll1 = l1_loss(image_tensor, gt_image_tensor, rgb_loss_weight.unsqueeze(1))
+        if mp.imed_stereo_photometric_gate:
+            if len(viewpoint_cams) != 2 or [cam.stereo_eye for cam in viewpoint_cams] != ["L", "R"]:
+                raise ValueError("Photometric stereo loss requires one ordered L/R pair")
+            left_rgb_loss = l1_loss(
+                image_tensor[:1],
+                gt_image_tensor[:1],
+                rgb_loss_weight[:1].unsqueeze(1),
+            )
+            right_rgb_loss_weight = (
+                rgb_loss_weight[1:2] * stereo_rgb_weight_tensor[1:2]
+            )
+            right_rgb_loss = l1_loss(
+                image_tensor[1:2],
+                gt_image_tensor[1:2],
+                right_rgb_loss_weight.unsqueeze(1),
+            )
+            Ll1 = left_rgb_loss + mp.imed_stereo_right_loss_weight * right_rgb_loss
+            if not stereo_gate_logged:
+                right_valid = mask_tensor[1:2].bool()
+                valid_gate = stereo_rgb_weight_tensor[1:2][right_valid]
+                if valid_gate.numel() == 0:
+                    raise ValueError("Right stereo view has no geometrically valid RGB pixels")
+                print(
+                    "iMED detached right RGB gate: "
+                    f"mean={valid_gate.mean().item():.4f}, "
+                    f"min={valid_gate.min().item():.4f}, "
+                    f"max={valid_gate.max().item():.4f}"
+                )
+                stereo_gate_logged = True
+        else:
+            Ll1 = l1_loss(image_tensor, gt_image_tensor, rgb_loss_weight.unsqueeze(1))
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
         # norm
         if use_depth:
             depth_weight = hyper.depth_weight
             if mp.imed_metric_depth_loss:
                 depth_loss = robust_log_depth_loss(
-                    depth_tensor, gt_depth_tensor, depth_valid_mask
+                    primary_depth, primary_gt_depth, primary_depth_mask
                 ) * depth_weight
             else:
-                depth_loss = l1_loss(depth_tensor/(depth_tensor.max()+1e-6), gt_depth_tensor/(gt_depth_tensor.max()+1e-6), \
-                    mask=depth_valid_mask)*depth_weight
+                depth_loss = l1_loss(primary_depth/(primary_depth.max()+1e-6), primary_gt_depth/(primary_gt_depth.max()+1e-6), \
+                    mask=primary_depth_mask)*depth_weight
             loss = Ll1 + depth_loss 
         else:
             loss = Ll1
         
         if use_smooth:
             grad_weight=hyper.depth_weight
-            sm_loss = (grad_loss(depth_tensor, gt_depth_tensor, mask=depth_supervision_tensor)) * grad_weight
+            sm_loss = (grad_loss(
+                primary_depth,
+                primary_gt_depth,
+                mask=depth_supervision_tensor[primary_slice],
+            )) * grad_weight
             loss += sm_loss
             
         if use_normal:
             normal_weight = hyper.normal_weight
-            pseudo_normal=get_pseudo_normal(gt_depth_tensor, depth_valid_mask)
-            pseudo_normal = F.interpolate(pseudo_normal, gs_normal.shape[2:4])
-            normal_loss = mae_loss(gs_normal, pseudo_normal, depth_valid_mask)*normal_weight
+            pseudo_normal=get_pseudo_normal(primary_gt_depth, primary_depth_mask)
+            primary_gs_normal = gs_normal[primary_slice]
+            pseudo_normal = F.interpolate(pseudo_normal, primary_gs_normal.shape[2:4])
+            normal_loss = mae_loss(primary_gs_normal, pseudo_normal, primary_depth_mask)*normal_weight
             loss += normal_loss
             
         if use_confidence:
             un_img_weight = hyper.un_img_weight
             un_dep_weight = hyper.un_dep_weight
+            confidence_image_mask = valid_mask
+            if mp.imed_stereo_photometric_gate:
+                confidence_image_mask = valid_mask.clone()
+                confidence_image_mask[1:] = False
             confidence_loss_img = confidence_loss(gt_image_tensor, image_tensor, \
-                confidences, valid_mask)*un_img_weight
-            confidence_loss_dep = confidence_loss(gt_depth_tensor/gt_depth_tensor.max(), \
-                depth_tensor/depth_tensor.max(), confidences, depth_valid_mask)*un_dep_weight
+                confidences, confidence_image_mask)*un_img_weight
+            primary_confidences = confidences[primary_slice]
+            confidence_loss_dep = confidence_loss(primary_gt_depth/primary_gt_depth.max(), \
+                primary_depth/primary_depth.max(), primary_confidences, primary_depth_mask)*un_dep_weight
             loss += confidence_loss_img
             loss += confidence_loss_dep
             
         if stage == "fine" and hyper.time_smoothness_weight != 0:
+            tv_image_tensor = image_tensor[primary_slice]
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, \
                 hyper.l1_time_planes, hyper.plane_tv_weight) + \
-                    +(TV_loss(depth_tensor)+TV_loss(image_tensor))*hyper.depth_weight
+                    +(TV_loss(primary_depth)+TV_loss(tv_image_tensor))*hyper.depth_weight
             loss += tv_loss
             
         if opt.lambda_dssim != 0:

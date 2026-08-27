@@ -9,7 +9,11 @@ from torchvision import transforms as T
 import torch
 
 from utils.graphics_utils import focal2fov
-from utils.imed_stereo import project_left_depth_to_right, resolve_stereo_calibration
+from utils.imed_stereo import (
+    build_stereo_photometric_weight,
+    project_left_depth_to_right,
+    resolve_stereo_calibration,
+)
 from scene.pre_train_pc import get_pointcloud
 from scene.endo_loader import CameraInfo
 
@@ -28,6 +32,8 @@ class IMED_Dataset:
         pretrain_max_points=360000,
         use_principal_point=False,
         stereo_right_rgb_only=False,
+        stereo_photometric_gate=False,
+        stereo_photometric_sigma=0.10,
     ):
         self.root_dir = datadir
         self.downsample = downsample
@@ -40,9 +46,15 @@ class IMED_Dataset:
         self.pretrain_max_points = int(pretrain_max_points)
         self.use_principal_point = bool(use_principal_point)
         self.stereo_right_rgb_only = bool(stereo_right_rgb_only)
+        self.stereo_photometric_gate = bool(stereo_photometric_gate)
+        self.stereo_photometric_sigma = float(stereo_photometric_sigma)
         assert not self.stereo_right_rgb_only or self.use_stereo, (
             "imed_stereo_right_rgb_only requires imed_use_stereo"
         )
+        assert not self.stereo_photometric_gate or (
+            self.use_stereo and self.stereo_right_rgb_only
+        ), "Photometric gating requires stereo RGB-only supervision"
+        assert self.stereo_photometric_sigma > 0, "Photometric sigma must be positive"
         assert self.pretrain_keyframes >= 1, "imed_pretrain_keyframes must be >= 1"
         assert self.pretrain_max_points > 0, "imed_pretrain_max_points must be positive"
         assert not (use_source_overlap_mask and use_source_overlap_weight), (
@@ -63,6 +75,7 @@ class IMED_Dataset:
                 expected_intrinsics={"K2_L": self.K_map["K2_L"], "K2_R": self.K_map["K2_R"]},
             )
         self._load_streams()
+        self._stereo_gate_stats = []
 
         self.train_idxs = list(range(len(self.train_records)))
         self.test_idxs = list(range(len(self.test_records)))
@@ -330,6 +343,7 @@ class IMED_Dataset:
 
     def _record_to_camera(self, record, c2w, K, time_val, uid, source_overlap_mode="off", pair_id=-1):
         color = self._load_resized_rgb(record["rgb"])
+        stereo_rgb_weight = None
         if record["eye"] == "L":
             depth = np.load(record["depth"]).astype(np.float32)
             assert depth.shape == (self.H, self.W), f"Depth shape mismatch at {record['depth']}"
@@ -338,14 +352,30 @@ class IMED_Dataset:
             left_record = self.train_records[pair_id]
             depth_l = np.load(left_record["depth"]).astype(np.float32)
             valid_l = self._load_record_mask(left_record)
-            depth, projected_valid = project_left_depth_to_right(
+            depth, projected_valid, source_indices_r = project_left_depth_to_right(
                 depth_l,
                 valid_l,
                 self._scaled_intrinsics("K2_L"),
                 self._scaled_intrinsics("K2_R"),
                 self.stereo_transform,
+                return_source_indices=True,
             )
             mask = self._load_record_mask(record) & projected_valid
+            if self.stereo_photometric_gate:
+                stereo_rgb_weight = build_stereo_photometric_weight(
+                    self._load_resized_rgb(left_record["rgb"]),
+                    color,
+                    source_indices_r,
+                    mask,
+                    sigma=self.stereo_photometric_sigma,
+                )
+                valid_weights = stereo_rgb_weight[mask]
+                self._stereo_gate_stats.append(
+                    (
+                        float(mask.mean()),
+                        float(valid_weights.mean()) if valid_weights.size else 0.0,
+                    )
+                )
         assert mask.shape == (self.H, self.W), f"Mask shape mismatch for {record['rgb']}"
         source_overlap_mask = None
         if source_overlap_mode != "off":
@@ -406,6 +436,11 @@ class IMED_Dataset:
             depth_supervision=not (
                 record["eye"] == "R" and self.stereo_right_rgb_only
             ),
+            stereo_rgb_weight=(
+                torch.from_numpy(np.ascontiguousarray(stereo_rgb_weight))
+                if stereo_rgb_weight is not None
+                else None
+            ),
         )
 
     def format_infos(self, split):
@@ -463,6 +498,14 @@ class IMED_Dataset:
                 f"tool_free_mean={stats[:, 0].mean():.4f}, "
                 f"source_visible_mean={stats[:, 1].mean():.4f}, "
                 f"effective_mean={stats[:, 2].mean():.4f}"
+            )
+        if split == "train" and self.stereo_photometric_gate and self._stereo_gate_stats:
+            gate_stats = np.asarray(self._stereo_gate_stats, dtype=np.float64)
+            print(
+                "iMED stereo photometric gate: "
+                f"sigma={self.stereo_photometric_sigma:.4f}, "
+                f"right_valid_mean={gate_stats[:, 0].mean():.4f}, "
+                f"confidence_mean={gate_stats[:, 1].mean():.4f}"
             )
         return cams
 

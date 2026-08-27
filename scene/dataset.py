@@ -47,7 +47,8 @@ class FourDGSdataset(Dataset):
                           stereo_eye=getattr(caminfo, "stereo_eye", "mono"),
                           cx=getattr(caminfo, "cx", None),
                           cy=getattr(caminfo, "cy", None),
-                          depth_supervision=getattr(caminfo, "depth_supervision", True))
+                          depth_supervision=getattr(caminfo, "depth_supervision", True),
+                          stereo_rgb_weight=getattr(caminfo, "stereo_rgb_weight", None))
     
     def __len__(self):
         return len(self.dataset)
