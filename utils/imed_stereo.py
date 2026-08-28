@@ -13,6 +13,13 @@ import numpy as np
 CALIBRATION_FORMAT = "imed_endoscope2_stereo_v1"
 
 
+def use_stereo_auxiliary_for_stage(stage, fine_only):
+    """Return whether the right-view auxiliary is active in this train stage."""
+    if stage not in ("coarse", "fine"):
+        raise ValueError(f"Unsupported training stage: {stage}")
+    return not fine_only or stage == "fine"
+
+
 def resolve_stereo_calibration(calibration_dir, sequence_dir, expected_intrinsics=None):
     """Resolve and validate a per-sequence Endoscope-2 L-to-R calibration."""
     if not calibration_dir:

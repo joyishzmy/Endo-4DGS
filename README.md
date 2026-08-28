@@ -101,6 +101,11 @@ exposure-aligned, photometrically gated auxiliary RGB loss. Right-view depth,
 normal, confidence, and smoothness supervision remain disabled. It reuses the
 seed-1 `baseline_pp` and `g2v2_rgb` controls from the v2 pilot.
 
+The G4 pilot is `scripts/run_imed_stereo_fineonly_g4.sh`. It keeps G3 fixed but
+removes the right camera entirely during the coarse stage, then enables the
+same gated right RGB auxiliary only in the fine stage. This isolates whether
+early stereo appearance gradients disturb geometry and densification.
+
 ## Setup
 
 ```bash

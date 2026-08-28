@@ -41,6 +41,7 @@ from utils.imed_overlap import (
     build_imed_soft_overlap_weight,
     imed_soft_overlap_anneal_alpha,
 )
+from utils.imed_stereo import use_stereo_auxiliary_for_stage
 from time import time
 import copy
 import open3d as o3d
@@ -107,6 +108,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         print("iMED off-center principal-point projection enabled")
 
     stereo_pairs = None
+    stereo_aux_active = False
     if mp.imed_use_stereo:
         assert not opt.dataloader, "iMED paired stereo currently requires dataloader=False"
         assert not opt.zerostamp_init, "iMED paired stereo is incompatible with zerostamp_init"
@@ -142,7 +144,21 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 "iMED right camera loss: detached photometric gate, "
                 f"aux_weight={mp.imed_stereo_right_loss_weight:.4f}"
             )
-        print(f"iMED paired stereo sampler: pairs={len(stereo_pairs)}, batch_size=2")
+            stereo_aux_active = use_stereo_auxiliary_for_stage(
+                stage, mp.imed_stereo_right_fine_only
+            )
+            if mp.imed_stereo_right_fine_only:
+                print(
+                    "iMED staged stereo auxiliary: "
+                    f"stage={stage}, active={stereo_aux_active}"
+                )
+        else:
+            stereo_aux_active = True
+        effective_batch_size = 2 if stereo_aux_active else 1
+        print(
+            f"iMED paired stereo sampler: pairs={len(stereo_pairs)}, "
+            f"effective_batch_size={effective_batch_size}"
+        )
 
     if not viewpoint_stack and not opt.dataloader and stereo_pairs is None:
         # dnerf's branch
@@ -200,7 +216,9 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         # dynerf's branch
         if stereo_pairs is not None:
             left_index, right_index = random.choice(stereo_pairs)
-            viewpoint_cams = [train_cams[left_index], train_cams[right_index]]
+            viewpoint_cams = [train_cams[left_index]]
+            if stereo_aux_active:
+                viewpoint_cams.append(train_cams[right_index])
         elif opt.dataloader and not load_in_memory:
             try:
                 viewpoint_cams = next(loader)
@@ -274,7 +292,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                     depth_supervision_masks.append(mask.unsqueeze(0))
                 else:
                     depth_supervision_masks.append(torch.zeros_like(mask).unsqueeze(0))
-                if mp.imed_stereo_photometric_gate:
+                if stereo_aux_active and mp.imed_stereo_photometric_gate:
                     stereo_rgb_weight = getattr(viewpoint_cam, "stereo_rgb_weight", None)
                     if stereo_rgb_weight is None:
                         stereo_rgb_weight = torch.ones_like(mask, dtype=torch.float32)
@@ -384,16 +402,16 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         if use_confidence:
             confidences = torch.cat(confidences, 0) * valid_mask
 
-        # In G3 the synchronized right view is an auxiliary appearance cue.
+        # In G3/G4 the synchronized right view is an auxiliary appearance cue.
         # All original RGB-D/normal/confidence regularizers retain the exact
         # left-view batch semantics of the principal-point baseline.
-        primary_slice = slice(0, 1) if mp.imed_stereo_photometric_gate else slice(None)
+        primary_slice = slice(0, 1) if stereo_aux_active and mp.imed_stereo_photometric_gate else slice(None)
         primary_depth = depth_tensor[primary_slice]
         primary_gt_depth = gt_depth_tensor[primary_slice]
         primary_depth_mask = depth_valid_mask[primary_slice]
         
         # Loss
-        if mp.imed_stereo_photometric_gate:
+        if stereo_aux_active and mp.imed_stereo_photometric_gate:
             if len(viewpoint_cams) != 2 or [cam.stereo_eye for cam in viewpoint_cams] != ["L", "R"]:
                 raise ValueError("Photometric stereo loss requires one ordered L/R pair")
             left_rgb_loss = l1_loss(
@@ -460,7 +478,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             un_img_weight = hyper.un_img_weight
             un_dep_weight = hyper.un_dep_weight
             confidence_image_mask = valid_mask
-            if mp.imed_stereo_photometric_gate:
+            if stereo_aux_active and mp.imed_stereo_photometric_gate:
                 confidence_image_mask = valid_mask.clone()
                 confidence_image_mask[1:] = False
             confidence_loss_img = confidence_loss(gt_image_tensor, image_tensor, \

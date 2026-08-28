@@ -14,6 +14,7 @@ from utils.imed_stereo import (
     build_stereo_photometric_weight,
     project_left_depth_to_right,
     resolve_stereo_calibration,
+    use_stereo_auxiliary_for_stage,
 )
 
 
@@ -21,6 +22,9 @@ depth = np.full((3, 4), 2.0, dtype=np.float32)
 valid = np.ones_like(depth, dtype=np.bool_)
 K = np.asarray([[2.0, 0.0, 1.5], [0.0, 2.0, 1.0], [0.0, 0.0, 1.0]])
 identity = np.eye(4)
+assert use_stereo_auxiliary_for_stage("coarse", fine_only=True) is False
+assert use_stereo_auxiliary_for_stage("fine", fine_only=True) is True
+assert use_stereo_auxiliary_for_stage("coarse", fine_only=False) is True
 projected, mask = project_left_depth_to_right(depth, valid, K, K, identity)
 np.testing.assert_allclose(projected, depth)
 assert mask.all()
