@@ -18,10 +18,12 @@ from utils.loss_utils import get_smallest_axis
 from time import time as get_time
 import torch.nn.functional as F
 from utils.sh_utils import RGB2SH
+from utils.imed_stereo import isolate_stereo_appearance_inputs
 
 
 def render(viewpoint_camera, gs, pipe, bg_color: torch.Tensor, scaling_modifier = 1.0, \
-        override_color = None, stage="fine", cam_type=None, iteration=0, mode='train'):
+        override_color = None, stage="fine", cam_type=None, iteration=0, mode='train',
+        appearance_only=False):
     """
     Render the scene. 
     
@@ -85,13 +87,28 @@ def render(viewpoint_camera, gs, pipe, bg_color: torch.Tensor, scaling_modifier 
     else:
         means3D_final, scales_final, rotations_final, opacity_final, shs_final = gs._deformation(means3D, scales, 
                                                                 rotations, opacity, shs, time)
+    if appearance_only:
+        means3D_final, scales_final, rotations_final, opacity_final, shs_final = (
+            isolate_stereo_appearance_inputs(
+                means3D_final,
+                scales_final,
+                rotations_final,
+                opacity_final,
+                # Always expose only the base SH parameters to the auxiliary;
+                # deformation/geometry must remain controlled by the left view.
+                gs.get_features,
+            )
+        )
+        if cov3D_precomp is not None:
+            cov3D_precomp = cov3D_precomp.detach()
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     colors_precomp = None
     if override_color is None:
         if pipe.convert_SHs_python:
             shs_view = gs.get_features.transpose(1, 2).view(-1, 3, (gs.max_sh_degree+1)**2)
-            dir_pp = (gs.get_xyz - viewpoint_camera.camera_center.cuda().repeat(gs.get_features.shape[0], 1))
+            xyz_for_direction = gs.get_xyz.detach() if appearance_only else gs.get_xyz
+            dir_pp = (xyz_for_direction - viewpoint_camera.camera_center.cuda().repeat(gs.get_features.shape[0], 1))
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
             sh2rgb = eval_sh(gs.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
@@ -143,4 +160,3 @@ def render(viewpoint_camera, gs, pipe, bg_color: torch.Tensor, scaling_modifier 
         
     
     return re_dict
-

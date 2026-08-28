@@ -106,6 +106,11 @@ removes the right camera entirely during the coarse stage, then enables the
 same gated right RGB auxiliary only in the fine stage. This isolates whether
 early stereo appearance gradients disturb geometry and densification.
 
+The G5 pilot is `scripts/run_imed_stereo_appearance_g5.sh`. It keeps G4's stage
+schedule, but the right-view auxiliary can backpropagate only to the Gaussian
+SH features. Position, scale, rotation, opacity, deformation/grid parameters,
+and densification statistics remain controlled exclusively by the left view.
+
 ## Setup
 
 ```bash

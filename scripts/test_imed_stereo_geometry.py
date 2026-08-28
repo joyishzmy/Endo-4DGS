@@ -6,12 +6,14 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.imed_stereo import (
     CALIBRATION_FORMAT,
     build_stereo_photometric_weight,
+    isolate_stereo_appearance_inputs,
     project_left_depth_to_right,
     resolve_stereo_calibration,
     use_stereo_auxiliary_for_stage,
@@ -25,6 +27,22 @@ identity = np.eye(4)
 assert use_stereo_auxiliary_for_stage("coarse", fine_only=True) is False
 assert use_stereo_auxiliary_for_stage("fine", fine_only=True) is True
 assert use_stereo_auxiliary_for_stage("coarse", fine_only=False) is True
+
+# The right auxiliary must update SH appearance but not geometry/material
+# support. This CPU autograd test guards the detach boundary independently of
+# the CUDA rasterizer.
+geometry = torch.tensor([2.0], requires_grad=True)
+scales = torch.tensor([3.0], requires_grad=True)
+rotations = torch.tensor([4.0], requires_grad=True)
+opacity = torch.tensor([5.0], requires_grad=True)
+appearance = torch.tensor([6.0], requires_grad=True)
+isolated = isolate_stereo_appearance_inputs(
+    geometry, scales, rotations, opacity, appearance
+)
+sum(value.sum() for value in isolated if value is not None).backward()
+assert geometry.grad is None and scales.grad is None
+assert rotations.grad is None and opacity.grad is None
+assert appearance.grad is not None and appearance.grad.item() == 1.0
 projected, mask = project_left_depth_to_right(depth, valid, K, K, identity)
 np.testing.assert_allclose(projected, depth)
 assert mask.all()

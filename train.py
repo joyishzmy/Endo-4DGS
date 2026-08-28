@@ -110,6 +110,8 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     stereo_pairs = None
     stereo_aux_active = False
     if mp.imed_use_stereo:
+        if mp.imed_stereo_right_appearance_only and not mp.imed_stereo_photometric_gate:
+            raise ValueError("Appearance-only stereo requires photometric gating")
         assert not opt.dataloader, "iMED paired stereo currently requires dataloader=False"
         assert not opt.zerostamp_init, "iMED paired stereo is incompatible with zerostamp_init"
         assert opt.batch_size == 2, "iMED paired stereo requires batch_size=2 (one L/R pair)"
@@ -144,6 +146,11 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 "iMED right camera loss: detached photometric gate, "
                 f"aux_weight={mp.imed_stereo_right_loss_weight:.4f}"
             )
+            if mp.imed_stereo_right_appearance_only:
+                print(
+                    "iMED right camera gradients: SH appearance only; "
+                    "geometry/deformation/densification isolated"
+                )
             stereo_aux_active = use_stereo_auxiliary_for_stage(
                 stage, mp.imed_stereo_right_fine_only
             )
@@ -255,6 +262,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
         radii_list = []
         visibility_filter_list = []
         viewspace_point_tensor_list = []
+        appearance_only_view_flags = []
         gs_normal = []
         if use_confidence:
             confidences = []
@@ -271,8 +279,14 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             # tgt_pcd = o3d.t.geometry.PointCloud(o3d.core.Tensor(pc.detach().cpu().numpy(), o3d.core.float32))
             # result = o3d.t.pipelines.registration.icp(src_pcd, tgt_pcd, 5)
             # corr_set = result.correspondence_set.numpy()
+            appearance_only_view = bool(
+                stereo_aux_active
+                and mp.imed_stereo_right_appearance_only
+                and getattr(viewpoint_cam, "stereo_eye", "mono") == "R"
+            )
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage, \
-                cam_type=scene.dataset_type, iteration=count)
+                cam_type=scene.dataset_type, iteration=count,
+                appearance_only=appearance_only_view)
             image, viewspace_point_tensor, radii, depth = \
                 render_pkg["render"], render_pkg["viewspace_points"], \
                 render_pkg["radii"], render_pkg['depth']
@@ -318,9 +332,17 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
+            appearance_only_view_flags.append(appearance_only_view)
 
-        radii = torch.cat(radii_list,0).max(dim=0).values
-        visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
+        geometry_view_indices = [
+            index for index, flag in enumerate(appearance_only_view_flags) if not flag
+        ]
+        if not geometry_view_indices:
+            raise ValueError("At least one primary geometry view is required")
+        radii = torch.cat([radii_list[index] for index in geometry_view_indices], 0).max(dim=0).values
+        visibility_filter = torch.cat(
+            [visibility_filter_list[index] for index in geometry_view_indices], 0
+        ).any(dim=0)
         
         if len(masks) != 0:
             mask_tensor = torch.cat(masks, 0)
@@ -523,7 +545,7 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
             
             os.execv(sys.executable, [sys.executable] + sys.argv)
         viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
-        for idx in range(0, len(viewspace_point_tensor_list)):
+        for idx in geometry_view_indices:
             if jump:
                 viewspace_point_tensor_grad = viewspace_point_tensor_grad
             else:

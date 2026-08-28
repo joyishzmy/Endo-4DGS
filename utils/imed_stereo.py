@@ -20,6 +20,18 @@ def use_stereo_auxiliary_for_stage(stage, fine_only):
     return not fine_only or stage == "fine"
 
 
+def isolate_stereo_appearance_inputs(means3d, scales, rotations, opacity, shs):
+    """Detach geometry/material support while retaining SH appearance gradients."""
+    detach_optional = lambda value: None if value is None else value.detach()
+    return (
+        means3d.detach(),
+        detach_optional(scales),
+        detach_optional(rotations),
+        opacity.detach(),
+        shs,
+    )
+
+
 def resolve_stereo_calibration(calibration_dir, sequence_dir, expected_intrinsics=None):
     """Resolve and validate a per-sequence Endoscope-2 L-to-R calibration."""
     if not calibration_dir:
