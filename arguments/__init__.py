@@ -73,6 +73,8 @@ class ModelParams(ParamGroup):
         self.imed_stereo_right_loss_weight=0.25
         self.imed_stereo_right_fine_only=False
         self.imed_stereo_right_appearance_only=False
+        self.imed_stereo_adaptive_gate=False
+        self.imed_stereo_adaptive_confidence_floor=0.80
         self.imed_metric_depth_loss=False
         self.imed_pretrain_keyframes=1
         self.imed_pretrain_max_points=360000

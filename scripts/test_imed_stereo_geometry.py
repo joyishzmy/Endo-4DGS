@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from utils.imed_stereo import (
     CALIBRATION_FORMAT,
+    build_stereo_adaptive_confidence_weight,
     build_stereo_photometric_weight,
     isolate_stereo_appearance_inputs,
     project_left_depth_to_right,
@@ -73,6 +74,24 @@ corrupt_weight = build_stereo_photometric_weight(
 )
 assert corrupt_weight[1, 2] < clean_weight[1, 2]
 assert np.all(corrupt_weight[~projected_valid] == 0)
+
+# The adaptive gate must preserve confident pixels, suppress weak pixels, and
+# fade an entire frame according to its reliable-pixel fraction.
+confidence = torch.tensor([[[1.0, 0.9], [0.8, 0.0]]])
+valid_confidence = torch.tensor([[[True, True], [True, False]]])
+adaptive = build_stereo_adaptive_confidence_weight(
+    confidence, valid_confidence, confidence_floor=0.8
+)
+expected_reliability = (1.0 + 0.5 + 0.0) / 3.0
+assert torch.isclose(adaptive[0, 0, 0], torch.tensor(expected_reliability))
+assert torch.isclose(adaptive[0, 0, 1], torch.tensor(0.5 * expected_reliability))
+assert adaptive[0, 1, 0].item() == 0.0
+assert adaptive[0, 1, 1].item() == 0.0
+try:
+    build_stereo_adaptive_confidence_weight(confidence, valid_confidence, 1.0)
+    raise AssertionError("Invalid adaptive confidence floor was accepted")
+except ValueError:
+    pass
 
 # Calibration files retain float64 intrinsics, whereas the loader uses
 # float32. This round-off must pass, but a genuinely different K must fail.

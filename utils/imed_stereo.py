@@ -32,6 +32,34 @@ def isolate_stereo_appearance_inputs(means3d, scales, rotations, opacity, shs):
     )
 
 
+def build_stereo_adaptive_confidence_weight(confidence, valid, confidence_floor=0.80):
+    """Conservatively fade unreliable right-view appearance supervision.
+
+    ``confidence`` is the detached source-only photometric confidence produced
+    by :func:`build_stereo_photometric_weight`.  A smooth ramp keeps only the
+    high-confidence part of the map.  Its valid-pixel mean is then used as a
+    frame-level reliability factor, so a frame with few trustworthy
+    correspondences automatically approaches the left-only baseline.
+
+    The operation intentionally preserves the input tensor type/device and is
+    differentiable only with respect to ``confidence``.  Training passes a
+    detached camera tensor, so the gate cannot be optimized by the renderer.
+    """
+    if not 0.0 <= confidence_floor < 1.0:
+        raise ValueError("confidence_floor must be in [0, 1)")
+    if confidence.shape != valid.shape:
+        raise ValueError("confidence and valid must have identical shapes")
+
+    valid_float = valid.to(dtype=confidence.dtype)
+    strict = ((confidence - confidence_floor) / (1.0 - confidence_floor)).clamp(0.0, 1.0)
+    spatial_dims = tuple(range(1, strict.ndim))
+    valid_count = valid_float.sum(dim=spatial_dims, keepdim=True).clamp_min(1.0)
+    frame_reliability = (strict * valid_float).sum(
+        dim=spatial_dims, keepdim=True
+    ) / valid_count
+    return strict * frame_reliability * valid_float
+
+
 def resolve_stereo_calibration(calibration_dir, sequence_dir, expected_intrinsics=None):
     """Resolve and validate a per-sequence Endoscope-2 L-to-R calibration."""
     if not calibration_dir:

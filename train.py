@@ -41,7 +41,10 @@ from utils.imed_overlap import (
     build_imed_soft_overlap_weight,
     imed_soft_overlap_anneal_alpha,
 )
-from utils.imed_stereo import use_stereo_auxiliary_for_stage
+from utils.imed_stereo import (
+    build_stereo_adaptive_confidence_weight,
+    use_stereo_auxiliary_for_stage,
+)
 from time import time
 import copy
 import open3d as o3d
@@ -112,6 +115,11 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
     if mp.imed_use_stereo:
         if mp.imed_stereo_right_appearance_only and not mp.imed_stereo_photometric_gate:
             raise ValueError("Appearance-only stereo requires photometric gating")
+        if mp.imed_stereo_adaptive_gate:
+            if not mp.imed_stereo_right_appearance_only:
+                raise ValueError("Adaptive stereo gating requires appearance-only supervision")
+            if not 0.0 <= mp.imed_stereo_adaptive_confidence_floor < 1.0:
+                raise ValueError("Adaptive stereo confidence floor must be in [0, 1)")
         assert not opt.dataloader, "iMED paired stereo currently requires dataloader=False"
         assert not opt.zerostamp_init, "iMED paired stereo is incompatible with zerostamp_init"
         assert opt.batch_size == 2, "iMED paired stereo requires batch_size=2 (one L/R pair)"
@@ -150,6 +158,11 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 print(
                     "iMED right camera gradients: SH appearance only; "
                     "geometry/deformation/densification isolated"
+                )
+            if mp.imed_stereo_adaptive_gate:
+                print(
+                    "iMED adaptive right reliability: detached high-confidence ramp, "
+                    f"floor={mp.imed_stereo_adaptive_confidence_floor:.4f}"
                 )
             stereo_aux_active = use_stereo_auxiliary_for_stage(
                 stage, mp.imed_stereo_right_fine_only
@@ -441,9 +454,14 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                 gt_image_tensor[:1],
                 rgb_loss_weight[:1].unsqueeze(1),
             )
-            right_rgb_loss_weight = (
-                rgb_loss_weight[1:2] * stereo_rgb_weight_tensor[1:2]
-            )
+            right_gate = stereo_rgb_weight_tensor[1:2]
+            if mp.imed_stereo_adaptive_gate:
+                right_gate = build_stereo_adaptive_confidence_weight(
+                    right_gate,
+                    mask_tensor[1:2].bool(),
+                    mp.imed_stereo_adaptive_confidence_floor,
+                )
+            right_rgb_loss_weight = rgb_loss_weight[1:2] * right_gate
             right_rgb_loss = l1_loss(
                 image_tensor[1:2],
                 gt_image_tensor[1:2],
@@ -461,6 +479,14 @@ def scene_reconstruction(mp, opt, hyper, pipe, testing_iterations, saving_iterat
                     f"min={valid_gate.min().item():.4f}, "
                     f"max={valid_gate.max().item():.4f}"
                 )
+                if mp.imed_stereo_adaptive_gate:
+                    adaptive_gate = right_gate[right_valid]
+                    print(
+                        "iMED adaptive right RGB gate: "
+                        f"mean={adaptive_gate.mean().item():.4f}, "
+                        f"min={adaptive_gate.min().item():.4f}, "
+                        f"max={adaptive_gate.max().item():.4f}"
+                    )
                 stereo_gate_logged = True
         else:
             Ll1 = l1_loss(image_tensor, gt_image_tensor, rgb_loss_weight.unsqueeze(1))
