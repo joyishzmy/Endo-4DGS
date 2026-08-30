@@ -15,8 +15,22 @@ from math import exp
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-lpips_alex = lpips.LPIPS(net='alex') # best forward scores
-lpips_vgg = lpips.LPIPS(net='vgg') # closer to "traditional" perceptual loss, when used for optimization
+lpips_alex = None
+lpips_vgg = None
+
+
+def _get_lpips_model(net):
+    """Load LPIPS only when metrics are requested, not during hidden training."""
+    global lpips_alex, lpips_vgg
+    if net == 'alex':
+        if lpips_alex is None:
+            lpips_alex = lpips.LPIPS(net='alex')
+        return lpips_alex
+    if net == 'vgg':
+        if lpips_vgg is None:
+            lpips_vgg = lpips.LPIPS(net='vgg')
+        return lpips_vgg
+    raise ValueError(f"Unsupported LPIPS network: {net}")
 
 def mse(img1, img2):
     return (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
@@ -60,10 +74,10 @@ def lpips_old(img1, img2, net='alex', format='NCHW'):
         img1 = img1[None, ...]
         img2 = img2[None, ...]
     if net == 'alex':
-        model = lpips_alex.to(img1.device)
+        model = _get_lpips_model('alex').to(img1.device)
         return model(img1, img2)
     elif net == 'vgg':
-        model = lpips_vgg.to(img1.device)
+        model = _get_lpips_model('vgg').to(img1.device)
         return model(img1, img2)
     
 
@@ -145,9 +159,8 @@ def lpips_score(img1, img2, net='alex', format='NCHW'):
         img2 = img2.permute([0, 3, 1, 2])
 
     if net == 'alex':
-        model = lpips_alex.to(img1.device)
+        model = _get_lpips_model('alex').to(img1.device)
         return model(img1, img2)
     elif net == 'vgg':
-        model = lpips_vgg.to(img1.device)
+        model = _get_lpips_model('vgg').to(img1.device)
         return model(img1, img2)
-
